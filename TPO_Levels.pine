@@ -1,0 +1,566 @@
+//@version=6
+// =============================================================================
+//  TPO Levels  —  Market Profile key levels for ANY market
+//  Futures (ES/NQ/CL/GC + micros), NSE/BSE stocks & F&O, MCX, forex, crypto.
+//
+//  Draws only the decision-useful structure from each session's TPO profile:
+//  POC, Value Area, Initial Balance, single prints, tails/excess, poor highs/
+//  lows and naked POCs — distinct by BOTH colour and line style.
+//
+//  Design notes
+//   * Heavy work runs only when a TPO period closes, at session finalize and on
+//     the live bar (barstate.islast). Completed sessions never repaint.
+//   * Row counts use a map keyed by integer row index, cleared each session.
+//   * Universal session engine: in-session toggle (string sessions),
+//     exchange session (session.ismarket, DST-safe), or a 24h day-anchor —
+//     chosen automatically per symbol.
+// =============================================================================
+indicator("TPO Levels", overlay = true, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500)
+
+// =============================== INPUTS =======================================
+// ---- Session -----------------------------------------------------------------
+gS = "Session"
+sessionMode  = input.string("Auto", "Session mode", options = ["Auto", "Exchange session", "Main session (RTH)", "Full 24h", "Custom"], group = gS, tooltip = "Auto picks the basis per symbol: crypto 24/7, NSE/BSE, MCX (DST-safe), US-futures RTH, else the exchange's own session.")
+customSess   = input.session("0930-1600", "Custom session (HHMM-HHMM)", group = gS)
+customTZ     = input.string("America/New_York", "Custom / 24h timezone", group = gS, tooltip = "IANA tz, e.g. America/New_York, Asia/Kolkata, Europe/London, UTC")
+cryptoAnchor = input.string("UTC 00:00", "Crypto / 24h day anchor", options = ["UTC 00:00", "US open 09:30 NY", "Custom"], group = gS, tooltip = "Where the 'day' resets for 24/7 symbols and Full-24h mode.")
+cryptoCustom = input.session("0000-0000", "Crypto custom day start", group = gS, tooltip = "Used when day anchor = Custom. Equal start/end = a 24h window anchored at that time.")
+
+// ---- Profile -----------------------------------------------------------------
+gP = "Profile"
+tpoMinutes  = input.int(30, "TPO period (minutes)", minval = 1, group = gP)
+rowMode     = input.string("Auto", "Ticks per row", options = ["Auto", "Manual"], group = gP, tooltip = "Auto targets ~30-60 rows from the last 14 traded sessions' average range.")
+manualTicks = input.int(4, "  Manual ticks per row", minval = 1, group = gP)
+vaPct       = input.float(70, "Value area %", minval = 1, maxval = 99, group = gP) / 100.0
+targetRows  = input.int(45, "Auto target rows", minval = 20, maxval = 80, group = gP)
+
+// ---- Levels ------------------------------------------------------------------
+gL = "Levels"
+spMinRows   = input.int(2, "Single-print min rows", minval = 1, group = gL, tooltip = "Minimum consecutive 1-TPO rows to flag an interior single-print zone.")
+tailMinRows = input.int(2, "Tail / excess min rows", minval = 2, group = gL)
+poorMinTpo  = input.int(2, "Poor high/low min TPOs", minval = 2, group = gL, tooltip = "Extreme row needs >= this many TPOs and no tail to be a poor high/low.")
+
+// ---- Display -----------------------------------------------------------------
+gD = "Display"
+sessionsToShow = input.int(3, "Prior sessions to draw", minval = 0, maxval = 20, group = gD)
+showVAFill  = input.bool(true,  "Value-area shading", group = gD)
+showSingles = input.bool(true,  "Single-print boxes", group = gD)
+showTails   = input.bool(true,  "Tail / excess boxes", group = gD)
+showMini    = input.bool(false, "Mini profile histogram (live)", group = gD)
+showNaked   = input.bool(true,  "Naked POCs (extend until touched)", group = gD)
+showTable   = input.bool(true,  "Info header panel", group = gD)
+labelSizeIn = input.string("Small", "Label size", options = ["Tiny", "Small"], group = gD)
+tablePos    = input.string("Top Right", "Panel position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = gD)
+
+// ---- Colours -----------------------------------------------------------------
+gC = "Colours"
+theme = input.string("Dark", "Theme", options = ["Dark", "Light", "Custom"], group = gC)
+cuPoc    = input.color(#FFC107, "POC",             group = gC)
+cuVa     = input.color(#4DD0E1, "Value area",      group = gC)
+cuIb     = input.color(#90A4AE, "Initial balance", group = gC)
+cuSingle = input.color(#BA68C8, "Single prints",   group = gC)
+cuTail   = input.color(#81C784, "Tails / excess",  group = gC)
+cuPoor   = input.color(#FF7043, "Poor high/low",   group = gC)
+cuNpoc   = input.color(#FFC107, "Naked POC",       group = gC)
+
+// Alerts are exposed via alertcondition() (see bottom) — pick them in TradingView's
+// "Add alert" dialog: Naked POC touch, Poor high/low repair, VA enter/leave, IB break.
+
+// =============================== THEME ======================================
+isCustom = theme == "Custom"
+isLight  = theme == "Light"
+cPoc     = isCustom ? cuPoc    : isLight ? #FF8F00 : #FFC107
+cVa      = isCustom ? cuVa     : isLight ? #00838F : #4DD0E1
+cIb      = isCustom ? cuIb     : isLight ? #546E7A : #90A4AE
+cSingle  = isCustom ? cuSingle : isLight ? #8E24AA : #BA68C8
+cTail    = isCustom ? cuTail   : isLight ? #2E7D32 : #81C784
+cPoor    = isCustom ? cuPoor   : isLight ? #D84315 : #FF7043
+cNpoc    = isCustom ? cuNpoc   : isLight ? #FF8F00 : #FFC107
+cMiniOut = #607D8B
+
+lblSize = labelSizeIn == "Tiny" ? size.tiny : size.small
+tblPos  = tablePos == "Top Right" ? position.top_right : tablePos == "Top Left" ? position.top_left : tablePos == "Bottom Right" ? position.bottom_right : position.bottom_left
+
+// prior-session fade: add transparency so today's levels stand out
+f_fade(color base, int baseT, bool prior) =>
+    color.new(base, math.min(100, baseT + (prior ? 50 : 0)))
+
+// =============================== SESSION ENGINE ==============================
+// Resolve the basis. kind: "exchange" | "anchor" | "str".
+f_resolve() =>
+    string kind = "str"
+    string sStr = "0000-0000"
+    string tz   = syminfo.timezone
+    string aStr = "0000-0000"
+    string aTz  = "UTC"
+    root = syminfo.root
+    pref = syminfo.prefix
+    isCrypto = syminfo.type == "crypto"
+    aStrC = cryptoAnchor == "UTC 00:00" ? "0000-0000" : cryptoAnchor == "US open 09:30 NY" ? "0930-0930" : cryptoCustom
+    aTzC  = cryptoAnchor == "US open 09:30 NY" ? "America/New_York" : cryptoAnchor == "Custom" ? customTZ : "UTC"
+    if sessionMode == "Custom"
+        is24 = str.substring(customSess, 0, 4) == str.substring(customSess, 5, 9)
+        kind := is24 ? "anchor" : "str"
+        sStr := customSess
+        tz   := customTZ
+        aStr := customSess
+        aTz  := customTZ
+    else if sessionMode == "Full 24h"
+        kind := "anchor"
+        aStr := "0000-0000"
+        aTz  := syminfo.timezone
+    else if isCrypto
+        kind := "anchor"
+        aStr := aStrC
+        aTz  := aTzC
+    else if sessionMode == "Exchange session"
+        kind := "exchange"
+    else
+        // Auto or Main session (RTH) on a non-crypto symbol
+        if pref == "NSE" or pref == "BSE"
+            kind := "str"
+            sStr := "0915-1530"
+            tz   := "Asia/Kolkata"
+        else if pref == "MCX"
+            kind := "exchange"
+        else if root == "CL" or root == "MCL"
+            kind := "str"
+            sStr := "0900-1430"
+            tz   := "America/New_York"
+        else if root == "ES" or root == "MES" or root == "NQ" or root == "MNQ" or root == "YM" or root == "MYM" or root == "RTY" or root == "M2K"
+            kind := "str"
+            sStr := "0930-1600"
+            tz   := "America/New_York"
+        else if root == "GC" or root == "MGC"
+            kind := "str"
+            sStr := "0820-1330"
+            tz   := "America/New_York"
+        else
+            kind := "exchange"
+    [kind, sStr, tz, aStr, aTz]
+
+[sKind, sStr, sTz, aStr, aTz] = f_resolve()
+
+anchorTime = time("1D", aStr, aTz)
+inSess    = sKind == "exchange" ? session.ismarket : sKind == "anchor" ? true : not na(time(timeframe.period, sStr, sTz))
+newSess   = sKind == "anchor" ? (ta.change(anchorTime) != 0 and bar_index > 0) : (inSess and not inSess[1])
+sessEnded = sKind != "anchor" and not inSess and inSess[1]
+
+f_tzShort(string tz) =>
+    tz == "America/New_York" ? "ET" : tz == "Asia/Kolkata" ? "IST" : tz == "UTC" ? "UTC" : tz == "Europe/London" ? "UK" : tz
+
+basisTxt = sKind == "anchor" ? (syminfo.type == "crypto" ? "Crypto · " + (cryptoAnchor == "UTC 00:00" ? "UTC day" : cryptoAnchor == "US open 09:30 NY" ? "NY day" : "custom day") : "24h · " + f_tzShort(aTz)) : sKind == "exchange" ? "Exchange " + f_tzShort(syminfo.timezone) : (str.substring(sStr, 0, 2) + ":" + str.substring(sStr, 2, 4) + "–" + str.substring(sStr, 5, 7) + ":" + str.substring(sStr, 7, 9) + " " + f_tzShort(sTz))
+
+// =============================== STATE ======================================
+var map<int, int> tpoMap = map.new<int, int>()
+var bool  sessActive = false
+var int   sessStartMs = na
+var float sessHi = na
+var float sessLo = na
+var float rowSz  = na
+var int   minRow = na
+var int   maxRow = na
+var int   curPeriod = na
+var float perHi = na
+var float perLo = na
+var float ibHi  = na
+var float ibLo  = na
+var float cumVol = 0.0
+
+var array<float> rangeHist = array.new<float>()   // last 14 traded-session ranges
+var array<float> volHist   = array.new<float>()   // last 14 traded-session volumes
+
+type SL
+    int   x1
+    int   x2
+    float poc
+    float vah
+    float val
+    array<line>  lns
+    array<box>   bxs
+    array<label> lbs
+var array<SL> sessions = array.new<SL>()
+
+var array<line>  liveLn = array.new<line>()
+var array<box>   liveBx = array.new<box>()
+var array<label> liveLb = array.new<label>()
+
+var array<line>  npLn = array.new<line>()
+var array<label> npLb = array.new<label>()
+var array<float> npPx = array.new<float>()
+var array<bool>  npOn = array.new<bool>()
+var array<line>  poLn = array.new<line>()
+var array<label> poLb = array.new<label>()
+var array<float> poPx = array.new<float>()
+var array<bool>  poHi = array.new<bool>()
+var array<bool>  poOn = array.new<bool>()
+
+var float curVAH = na
+var float curVAL = na
+var float curIBH = na
+var float curIBL = na
+
+periodMs = tpoMinutes * 60 * 1000
+tfMin    = timeframe.in_seconds() / 60.0
+validTF  = tfMin <= tpoMinutes
+
+// =============================== HELPERS ====================================
+f_row(float price, float rs) =>
+    int(math.floor(price / rs))
+
+// commit one finished TPO period into map m: +1 per row it spanned.
+// returns [rLo, rHi] (na,na if nothing committed); caller updates min/max rows.
+f_commit(map<int, int> m, float rs, float lo, float hi) =>
+    int rLo = na
+    int rHi = na
+    if not na(lo) and not na(hi) and not na(rs) and rs > 0
+        rLo := f_row(lo, rs)
+        rHi := f_row(hi, rs)
+        for r = rLo to rHi
+            map.put(m, r, (map.contains(m, r) ? map.get(m, r) : 0) + 1)
+    [rLo, rHi]
+
+f_counts(map<int, int> m, int mn, int mx) =>
+    arr = array.new<int>()
+    for r = mn to mx
+        array.push(arr, map.contains(m, r) ? map.get(m, r) : 0)
+    arr
+
+// POC / VA / single prints / tails / poor flags from a counts array
+// returns [poc, vah, val, poorHigh, poorLow, spLo[], spHi[], tLo[], tHi[]]
+f_levels(array<int> counts, int mn, float rs) =>
+    n = array.size(counts)
+    float total = array.sum(counts)
+    int pocI = 0
+    int best = -1
+    float mid = (n - 1) / 2.0
+    for i = 0 to n - 1
+        c = array.get(counts, i)
+        if c > best or (c == best and math.abs(i - mid) < math.abs(pocI - mid))
+            best := c
+            pocI := i
+    int upper = pocI
+    int lower = pocI
+    float acc = array.get(counts, pocI)
+    float target = total * vaPct
+    // expand outward two rows at a time, taking the heavier side each step
+    while acc < target and (upper < n - 1 or lower > 0)
+        canUp = upper < n - 1
+        canDn = lower > 0
+        up = canUp ? array.get(counts, upper + 1) + (upper + 2 <= n - 1 ? array.get(counts, upper + 2) : 0) : -1
+        dn = canDn ? array.get(counts, lower - 1) + (lower - 2 >= 0 ? array.get(counts, lower - 2) : 0) : -1
+        goUp = canUp and (not canDn or up >= dn)
+        if goUp
+            nu = upper + 2 > n - 1 ? n - 1 : upper + 2
+            for k = upper + 1 to nu
+                acc += array.get(counts, k)
+            upper := nu
+        else
+            nl = lower - 2 < 0 ? 0 : lower - 2
+            for k = nl to lower - 1
+                acc += array.get(counts, k)
+            lower := nl
+    float poc = (mn + pocI + 0.5) * rs
+    float vah = (mn + upper + 0.5) * rs
+    float val = (mn + lower + 0.5) * rs
+    int topRun = 0
+    int ti = n - 1
+    while ti >= 0 and array.get(counts, ti) == 1
+        topRun += 1
+        ti -= 1
+    int botRun = 0
+    int bi = 0
+    while bi < n and array.get(counts, bi) == 1
+        botRun += 1
+        bi += 1
+    tLo = array.new<float>()
+    tHi = array.new<float>()
+    if topRun >= tailMinRows
+        array.push(tLo, (mn + n - topRun) * rs)
+        array.push(tHi, (mn + n) * rs)
+    if botRun >= tailMinRows
+        array.push(tLo, (mn) * rs)
+        array.push(tHi, (mn + botRun) * rs)
+    bool poorHigh = topRun < 2 and array.get(counts, n - 1) >= poorMinTpo
+    bool poorLow  = botRun < 2 and array.get(counts, 0) >= poorMinTpo
+    spLo = array.new<float>()
+    spHi = array.new<float>()
+    int k = 1
+    while k < n - 1
+        if array.get(counts, k) == 1
+            s = k
+            while k < n - 1 and array.get(counts, k) == 1
+                k += 1
+            e = k - 1
+            if (e - s + 1) >= spMinRows
+                array.push(spLo, (mn + s) * rs)
+                array.push(spHi, (mn + e + 1) * rs)
+        else
+            k += 1
+    [poc, vah, val, poorHigh, poorLow, spLo, spHi, tLo, tHi]
+
+f_line(int x1, int x2, float y, color col, string style, int w, bool ext) =>
+    line.new(x1, y, x2, y, xloc = xloc.bar_time, color = col, style = style, width = w, extend = ext ? extend.right : extend.none)
+
+f_label(int x, float y, string txt, color col) =>
+    label.new(x, y, txt, xloc = xloc.bar_time, style = label.style_none, textcolor = col, size = lblSize)
+
+// render one session's base levels into the given id arrays (prior = faded)
+f_render(int x1, int x2, float poc, float vah, float val, float ibh, float ibl, array<float> spLo, array<float> spHi, array<float> tLo, array<float> tHi, bool prior, array<line> oLn, array<box> oBx, array<label> oLb) =>
+    if showVAFill and not na(vah) and not na(val)
+        array.push(oBx, box.new(x1, vah, x2, val, xloc = xloc.bar_time, border_color = color.new(cVa, 100), bgcolor = color.new(cVa, prior ? 96 : 92)))
+    if showSingles and array.size(spLo) > 0
+        for i = 0 to array.size(spLo) - 1
+            array.push(oBx, box.new(x1, array.get(spHi, i), x2, array.get(spLo, i), xloc = xloc.bar_time, border_color = f_fade(cSingle, 40, prior), bgcolor = f_fade(cSingle, 85, prior)))
+    if showTails and array.size(tLo) > 0
+        for i = 0 to array.size(tLo) - 1
+            array.push(oBx, box.new(x1, array.get(tHi, i), x2, array.get(tLo, i), xloc = xloc.bar_time, border_color = color.new(cTail, 100), bgcolor = f_fade(cTail, 85, prior)))
+    if not na(ibh)
+        array.push(oLn, f_line(x1, x2, ibh, f_fade(cIb, 0, prior), line.style_dotted, 1, false))
+        array.push(oLb, f_label(x2, ibh, "IBH", f_fade(cIb, 0, prior)))
+    if not na(ibl)
+        array.push(oLn, f_line(x1, x2, ibl, f_fade(cIb, 0, prior), line.style_dotted, 1, false))
+        array.push(oLb, f_label(x2, ibl, "IBL", f_fade(cIb, 0, prior)))
+    if not na(vah)
+        array.push(oLn, f_line(x1, x2, vah, f_fade(cVa, 0, prior), line.style_dashed, 1, false))
+        array.push(oLb, f_label(x2, vah, "VAH", f_fade(cVa, 0, prior)))
+    if not na(val)
+        array.push(oLn, f_line(x1, x2, val, f_fade(cVa, 0, prior), line.style_dashed, 1, false))
+        array.push(oLb, f_label(x2, val, "VAL", f_fade(cVa, 0, prior)))
+    if not na(poc)
+        array.push(oLn, f_line(x1, x2, poc, f_fade(cPoc, 0, prior), line.style_solid, 2, false))
+        array.push(oLb, f_label(x2, poc, "POC", f_fade(cPoc, 0, prior)))
+
+f_clrLn(array<line> a) =>
+    if array.size(a) > 0
+        for i = 0 to array.size(a) - 1
+            line.delete(array.get(a, i))
+    array.clear(a)
+
+f_clrBx(array<box> a) =>
+    if array.size(a) > 0
+        for i = 0 to array.size(a) - 1
+            box.delete(array.get(a, i))
+    array.clear(a)
+
+f_clrLb(array<label> a) =>
+    if array.size(a) > 0
+        for i = 0 to array.size(a) - 1
+            label.delete(array.get(a, i))
+    array.clear(a)
+
+// =============================== NAKED POC / POOR REPAIR ===================
+// Runs BEFORE finalize so a level is never flagged touched on its creation bar.
+bool npocTouchEvt  = false
+bool poorRepairEvt = false
+if validTF
+    if array.size(npOn) > 0
+        for i = 0 to array.size(npOn) - 1
+            ln = array.get(npLn, i)
+            lb = array.get(npLb, i)
+            if array.get(npOn, i)
+                px = array.get(npPx, i)
+                if low <= px and px <= high             // price traded through -> no longer naked
+                    line.set_extend(ln, extend.none)
+                    line.set_x2(ln, time)
+                    line.set_color(ln, color.new(cNpoc, 75))
+                    label.set_textcolor(lb, color.new(cNpoc, 75))
+                    array.set(npOn, i, false)
+                    npocTouchEvt := true
+                else
+                    label.set_x(lb, time)               // ride the right edge while still naked
+    if array.size(poOn) > 0
+        for i = 0 to array.size(poOn) - 1
+            if array.get(poOn, i)
+                px = array.get(poPx, i)
+                hi = array.get(poHi, i)
+                repaired = hi ? high > px + syminfo.mintick : low < px - syminfo.mintick
+                if repaired
+                    ln2 = array.get(poLn, i)
+                    line.set_extend(ln2, extend.none)
+                    line.set_x2(ln2, time)
+                    line.set_color(ln2, color.new(cPoor, 75))
+                    array.set(poOn, i, false)
+                    poorRepairEvt := true
+
+// =============================== PER-BAR: SESSION LIFECYCLE =================
+if validTF
+    finalizeOld = sessActive and (newSess or sessEnded)
+    if finalizeOld
+        [frl, frh] = f_commit(tpoMap, rowSz, perLo, perHi)   // close the last open period
+        if not na(frl)
+            minRow := na(minRow) ? frl : (frl < minRow ? frl : minRow)
+            maxRow := na(maxRow) ? frh : (frh > maxRow ? frh : maxRow)
+        if not na(minRow) and not na(maxRow) and maxRow >= minRow and (maxRow - minRow) < 5000
+            counts = f_counts(tpoMap, minRow, maxRow)
+            [poc, vah, val, poorHigh, poorLow, spLo, spHi, tLo, tHi] = f_levels(counts, minRow, rowSz)
+            int xEnd = time
+            sl = SL.new(sessStartMs, xEnd, poc, vah, val, array.new<line>(), array.new<box>(), array.new<label>())
+            f_render(sl.x1, sl.x2, poc, vah, val, ibHi, ibLo, spLo, spHi, tLo, tHi, true, sl.lns, sl.bxs, sl.lbs)
+            array.push(sessions, sl)
+            if showNaked
+                npl = f_line(xEnd, xEnd, poc, color.new(cNpoc, 40), line.style_dashed, 1, true)
+                array.push(npLn, npl)
+                array.push(npLb, f_label(xEnd, poc, "nPOC", color.new(cNpoc, 40)))
+                array.push(npPx, poc)
+                array.push(npOn, true)
+            if poorHigh
+                pl = f_line(xEnd, xEnd, vah, color.new(cPoor, 0), line.style_dashed, 2, true)
+                array.push(poLn, pl)
+                array.push(poLb, f_label(xEnd, vah, "Poor H", color.new(cPoor, 0)))
+                array.push(poPx, vah)
+                array.push(poHi, true)
+                array.push(poOn, true)
+            if poorLow
+                pl2 = f_line(xEnd, xEnd, val, color.new(cPoor, 0), line.style_dashed, 2, true)
+                array.push(poLn, pl2)
+                array.push(poLb, f_label(xEnd, val, "Poor L", color.new(cPoor, 0)))
+                array.push(poPx, val)
+                array.push(poHi, false)
+                array.push(poOn, true)
+            array.push(rangeHist, sessHi - sessLo)
+            if array.size(rangeHist) > 14
+                array.shift(rangeHist)
+            array.push(volHist, cumVol)
+            if array.size(volHist) > 14
+                array.shift(volHist)
+        while array.size(sessions) > sessionsToShow
+            old = array.shift(sessions)
+            f_clrLn(old.lns)
+            f_clrBx(old.bxs)
+            f_clrLb(old.lbs)
+        while array.size(npLn) > sessionsToShow + 1
+            line.delete(array.shift(npLn))
+            label.delete(array.shift(npLb))
+            array.shift(npPx)
+            array.shift(npOn)
+        while array.size(poLn) > sessionsToShow + 1
+            line.delete(array.shift(poLn))
+            label.delete(array.shift(poLb))
+            array.shift(poPx)
+            array.shift(poHi)
+            array.shift(poOn)
+        sessActive := false
+
+    if newSess
+        map.clear(tpoMap)
+        minRow := na
+        maxRow := na
+        sessStartMs := time
+        sessHi := high
+        sessLo := low
+        curPeriod := 0
+        perHi := high
+        perLo := low
+        ibHi := high
+        ibLo := low
+        cumVol := na(volume) ? 0.0 : volume
+        avgRange  = array.size(rangeHist) > 0 ? array.avg(rangeHist) : na
+        autoTicks = not na(avgRange) and avgRange > 0 ? math.max(1, math.round(avgRange / targetRows / syminfo.mintick)) : manualTicks
+        ticks = rowMode == "Auto" ? autoTicks : manualTicks
+        rowSz := ticks * syminfo.mintick
+        sessActive := true
+
+    if sessActive and (sKind == "anchor" or inSess)
+        sessHi := math.max(sessHi, high)
+        sessLo := math.min(sessLo, low)
+        cumVol := cumVol + (na(volume) ? 0.0 : volume)
+        pIdx = int(math.floor((time - sessStartMs) / periodMs))
+        if not na(curPeriod) and pIdx != curPeriod
+            [arl, arh] = f_commit(tpoMap, rowSz, perLo, perHi)
+            if not na(arl)
+                minRow := na(minRow) ? arl : (arl < minRow ? arl : minRow)
+                maxRow := na(maxRow) ? arh : (arh > maxRow ? arh : maxRow)
+            curPeriod := pIdx
+            perHi := high
+            perLo := low
+        else
+            perHi := math.max(perHi, high)
+            perLo := math.min(perLo, low)
+        if curPeriod <= 1
+            ibHi := math.max(ibHi, high)
+            ibLo := math.min(ibLo, low)
+
+// =============================== LIVE SESSION DRAW =========================
+if barstate.islast and validTF and sessActive and not na(rowSz)
+    f_clrLn(liveLn)
+    f_clrBx(liveBx)
+    f_clrLb(liveLb)
+    oLo  = f_row(perLo, rowSz)
+    oHi  = f_row(perHi, rowSz)
+    lMin = na(minRow) ? oLo : (minRow < oLo ? minRow : oLo)
+    lMax = na(maxRow) ? oHi : (maxRow > oHi ? maxRow : oHi)
+    if lMax >= lMin and (lMax - lMin) < 5000
+        counts = f_counts(tpoMap, lMin, lMax)
+        for r = oLo to oHi                           // overlay the open period provisionally
+            array.set(counts, r - lMin, array.get(counts, r - lMin) + 1)
+        [poc, vah, val, poorHigh, poorLow, spLo, spHi, tLo, tHi] = f_levels(counts, lMin, rowSz)
+        curVAH := vah
+        curVAL := val
+        curIBH := ibHi
+        curIBL := ibLo
+        f_render(sessStartMs, time, poc, vah, val, ibHi, ibLo, spLo, spHi, tLo, tHi, false, liveLn, liveBx, liveLb)
+        if array.size(liveLn) > 0                    // live levels extend to the right edge
+            for i = 0 to array.size(liveLn) - 1
+                line.set_extend(array.get(liveLn, i), extend.right)
+        if showMini
+            int baseX = bar_index
+            int maxLen = 40
+            int maxC = int(array.max(counts))
+            n = array.size(counts)
+            step = int(math.max(1, math.ceil(n / 120.0)))
+            for i = 0 to n - 1 by step
+                c = array.get(counts, i)
+                if c > 0
+                    len = int(math.max(1, math.round(c / math.max(1, maxC) * maxLen)))
+                    yTop  = (lMin + i + 1) * rowSz
+                    yBot  = (lMin + i) * rowSz
+                    rowPx = (lMin + i + 0.5) * rowSz
+                    inVA  = rowPx <= vah and rowPx >= val
+                    isPoc = math.abs(rowPx - poc) < rowSz
+                    col = isPoc ? color.new(cPoc, 30) : inVA ? color.new(cVa, 60) : color.new(cMiniOut, 60)
+                    array.push(liveBx, box.new(baseX + 2, yTop, baseX + 2 + len, yBot, xloc = xloc.bar_index, border_color = color.new(col, 100), bgcolor = col))
+
+// =============================== ALERTS ====================================
+inVAnow    = not na(curVAH) and not na(curVAL) and close <= curVAH and close >= curVAL
+vaEnterEvt = inVAnow and not inVAnow[1]
+vaLeaveEvt = not inVAnow and inVAnow[1]
+coIBH      = ta.crossover(close, curIBH)    // computed every bar (consistent history) per Cx10002
+coIBL      = ta.crossunder(close, curIBL)
+ibBreakEvt = (not na(curIBH) and coIBH) or (not na(curIBL) and coIBL)
+
+alertcondition(npocTouchEvt,  "Naked POC touched",      "Price touched a naked POC")
+alertcondition(poorRepairEvt, "Poor high/low repaired", "Price traded through a poor high/low")
+alertcondition(vaEnterEvt,    "Entered value area",     "Price entered the value area")
+alertcondition(vaLeaveEvt,    "Left value area",        "Price left the value area")
+alertcondition(ibBreakEvt,    "IB break",               "Price broke the initial balance")
+
+// =============================== INFO PANEL ================================
+recentVol = math.sum(nz(volume), 20)
+noVol     = na(volume) or recentVol == 0
+isTickVol = syminfo.type == "forex" or syminfo.type == "cfd"
+rvolLabel = noVol ? "RVol" : isTickVol ? "RVol (tick)" : syminfo.type == "crypto" ? "RVol · " + syminfo.prefix : "RVol"
+avgVol    = array.size(volHist) > 0 ? array.avg(volHist) : na
+rvolVal   = noVol or na(avgVol) or avgVol == 0 ? na : cumVol / avgVol
+rvolTxt   = noVol ? "n/a" : na(rvolVal) ? "—" : str.tostring(rvolVal, "0.00") + "×"
+atrTxt    = array.size(rangeHist) > 0 ? str.tostring(array.avg(rangeHist) / syminfo.mintick, "0") + " t" : "—"
+
+if showTable and barstate.islast and validTF
+    var table t = table.new(tblPos, 2, 4, border_width = 1)
+    txtCol = isLight ? color.black : color.white
+    bgCol  = isLight ? color.new(color.white, 10) : color.new(#1E222D, 10)
+    table.cell(t, 0, 0, "TPO Levels", text_color = txtCol, bgcolor = bgCol, text_size = size.small)
+    table.cell(t, 1, 0, basisTxt,     text_color = txtCol, bgcolor = bgCol, text_size = size.small)
+    table.cell(t, 0, 1, "Mode",       text_color = txtCol, bgcolor = bgCol, text_size = size.small)
+    table.cell(t, 1, 1, sessionMode,  text_color = txtCol, bgcolor = bgCol, text_size = size.small)
+    table.cell(t, 0, 2, rvolLabel,    text_color = txtCol, bgcolor = bgCol, text_size = size.small)
+    volHint = noVol ? (syminfo.prefix == "NSE" or syminfo.prefix == "BSE" ? "  (use futures e.g. NIFTY1!)" : "  (use futures for RVol)") : ""
+    table.cell(t, 1, 2, rvolTxt + volHint, text_color = txtCol, bgcolor = bgCol, text_size = size.small)
+    table.cell(t, 0, 3, "ATR 14s",    text_color = txtCol, bgcolor = bgCol, text_size = size.small)
+    table.cell(t, 1, 3, atrTxt,       text_color = txtCol, bgcolor = bgCol, text_size = size.small)
+
+// =============================== TF WARNING ===============================
+var label warnLbl = na
+if barstate.islast and not validTF
+    label.delete(warnLbl)
+    warnLbl := label.new(bar_index, high, "TPO Levels: chart timeframe (" + str.tostring(tfMin, "0") + "m) is larger than the TPO period (" + str.tostring(tpoMinutes) + "m).\nLower the chart timeframe or raise the TPO period.", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.normal)

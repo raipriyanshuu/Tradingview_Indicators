@@ -1,0 +1,455 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0
+// © Multi-VWAP
+//@version=6
+indicator("Multi-VWAP", overlay = true, max_labels_count = 60, max_lines_count = 10)
+
+// =============================================================================
+//  Daily / Weekly / Monthly / Yearly VWAP with volume-weighted sigma (or %) bands.
+//  * var accumulators reset on each anchor; no lookahead on chart data.
+//  * W/M/Y safeguard: if the chart's history does not reach the current
+//    period's first bar, sums come from a higher timeframe (60m for W/M, 1D for
+//    Y) using confirmed HTF bars ([1] + lookahead_on = non-repainting) plus the
+//    chart bars of the still-open HTF bar. Label shows "(HTF calc)".
+//    If even the HTF can't reach the anchor, the label shows "(incomplete)".
+// =============================================================================
+
+gS = "Source & Session"
+gD = "Daily"
+gW = "Weekly"
+gM = "Monthly"
+gY = "Yearly"
+gX = "Display"
+
+FUT_NOTE = "Continuous futures (...1! / ...2!): Monthly/Yearly VWAP spans contract rolls; use a back-adjusted chart (TradingView \"B-ADJ\") or the specific contract."
+PCT_NOTE = "Standard deviation: bands = VWAP +/- mult x volume-weighted stdev. Percentage: mult is a % of VWAP (1.0 = +/-1%)."
+
+// ---- Source & Session -------------------------------------------------------
+src          = input.source(hlc3, "Source", group = gS)
+sessionMode  = input.string("Auto", "Daily session", options = ["Auto", "Exchange session", "Main session (RTH)", "Full 24h", "Custom"], group = gS, tooltip = "Auto: crypto -> day anchor below; NSE/BSE 09:15-15:30 IST; MCX & others -> exchange session; US futures -> full Globex session (or RTH, see next input).")
+usFutBasis   = input.string("Globex (full session)", "US futures daily basis (Auto)", options = ["Globex (full session)", "RTH"], group = gS, tooltip = "RTH: ES/NQ/YM/RTY (+micros) 09:30-16:00, CL/MCL 09:00-14:30, GC/MGC 08:20-13:30 New York.")
+customSess   = input.session("0930-1600", "Custom session (HHMM-HHMM)", group = gS, tooltip = "Equal start/end (e.g. 1800-1800) = a 24h day anchored at that time.")
+customTZ     = input.string("America/New_York", "Custom / 24h timezone", group = gS, tooltip = "IANA tz, e.g. America/New_York, Asia/Kolkata, Europe/London, UTC")
+cryptoAnchor = input.string("UTC 00:00", "Crypto day anchor", options = ["UTC 00:00", "US open 09:30 NY", "Custom"], group = gS)
+cryptoCustom = input.session("0000-0000", "Crypto custom day start", group = gS, tooltip = "Used when crypto anchor = Custom (timezone = Custom / 24h timezone).")
+
+// ---- Daily -------------------------------------------------------------------
+dShow   = input.bool(true, "Show VWAP", group = gD)
+dShowB  = input.bool(true, "Show bands", group = gD)
+dB1     = input.bool(true, "Band 1  (mult)", inline = "d1", group = gD)
+dM1     = input.float(1.0, "", minval = 0.01, step = 0.25, inline = "d1", group = gD)
+dB2     = input.bool(true, "Band 2  (mult)", inline = "d2", group = gD)
+dM2     = input.float(2.0, "", minval = 0.01, step = 0.25, inline = "d2", group = gD)
+dB3     = input.bool(true, "Band 3  (mult)", inline = "d3", group = gD)
+dM3     = input.float(3.0, "", minval = 0.01, step = 0.25, inline = "d3", group = gD)
+dMode   = input.string("Standard deviation", "Band mode", options = ["Standard deviation", "Percentage"], group = gD, tooltip = PCT_NOTE)
+dCol    = input.color(#4DD0E1, "Line colour / width / style", inline = "dl", group = gD)
+dWid    = input.int(2, "", minval = 1, maxval = 5, inline = "dl", group = gD)
+dSty    = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], inline = "dl", group = gD)
+dBCol   = input.color(#4DD0E166, "Band colour", group = gD)
+dFill   = input.bool(false, "Fill between +1 / -1 bands", group = gD)
+dPrevOn = input.bool(false, "Show previous day's final VWAP", group = gD)
+
+// ---- Weekly ------------------------------------------------------------------
+wShow   = input.bool(true, "Show VWAP", group = gW)
+wShowB  = input.bool(false, "Show bands", group = gW)
+wB1     = input.bool(true, "Band 1  (mult)", inline = "w1", group = gW)
+wM1     = input.float(1.0, "", minval = 0.01, step = 0.25, inline = "w1", group = gW)
+wB2     = input.bool(true, "Band 2  (mult)", inline = "w2", group = gW)
+wM2     = input.float(2.0, "", minval = 0.01, step = 0.25, inline = "w2", group = gW)
+wB3     = input.bool(true, "Band 3  (mult)", inline = "w3", group = gW)
+wM3     = input.float(3.0, "", minval = 0.01, step = 0.25, inline = "w3", group = gW)
+wMode   = input.string("Standard deviation", "Band mode", options = ["Standard deviation", "Percentage"], group = gW, tooltip = PCT_NOTE)
+wCol    = input.color(#FFC107, "Line colour / width / style", inline = "wl", group = gW)
+wWid    = input.int(2, "", minval = 1, maxval = 5, inline = "wl", group = gW)
+wSty    = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], inline = "wl", group = gW)
+wBCol   = input.color(#FFC10766, "Band colour", group = gW)
+wFill   = input.bool(false, "Fill between +1 / -1 bands", group = gW)
+wPrevOn = input.bool(false, "Show previous week's final VWAP", group = gW)
+
+// ---- Monthly -----------------------------------------------------------------
+mShow   = input.bool(false, "Show VWAP", group = gM, tooltip = FUT_NOTE)
+mShowB  = input.bool(false, "Show bands", group = gM)
+mB1     = input.bool(true, "Band 1  (mult)", inline = "m1", group = gM)
+mM1     = input.float(1.0, "", minval = 0.01, step = 0.25, inline = "m1", group = gM)
+mB2     = input.bool(true, "Band 2  (mult)", inline = "m2", group = gM)
+mM2     = input.float(2.0, "", minval = 0.01, step = 0.25, inline = "m2", group = gM)
+mB3     = input.bool(true, "Band 3  (mult)", inline = "m3", group = gM)
+mM3     = input.float(3.0, "", minval = 0.01, step = 0.25, inline = "m3", group = gM)
+mMode   = input.string("Standard deviation", "Band mode", options = ["Standard deviation", "Percentage"], group = gM, tooltip = PCT_NOTE)
+mCol    = input.color(#BA68C8, "Line colour / width / style", inline = "ml", group = gM)
+mWid    = input.int(2, "", minval = 1, maxval = 5, inline = "ml", group = gM)
+mSty    = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], inline = "ml", group = gM)
+mBCol   = input.color(#BA68C866, "Band colour", group = gM)
+mFill   = input.bool(false, "Fill between +1 / -1 bands", group = gM)
+mPrevOn = input.bool(false, "Show previous month's final VWAP", group = gM)
+
+// ---- Yearly ------------------------------------------------------------------
+yShow   = input.bool(false, "Show VWAP", group = gY, tooltip = FUT_NOTE)
+yShowB  = input.bool(false, "Show bands", group = gY)
+yB1     = input.bool(true, "Band 1  (mult)", inline = "y1", group = gY)
+yM1     = input.float(1.0, "", minval = 0.01, step = 0.25, inline = "y1", group = gY)
+yB2     = input.bool(true, "Band 2  (mult)", inline = "y2", group = gY)
+yM2     = input.float(2.0, "", minval = 0.01, step = 0.25, inline = "y2", group = gY)
+yB3     = input.bool(true, "Band 3  (mult)", inline = "y3", group = gY)
+yM3     = input.float(3.0, "", minval = 0.01, step = 0.25, inline = "y3", group = gY)
+yMode   = input.string("Standard deviation", "Band mode", options = ["Standard deviation", "Percentage"], group = gY, tooltip = PCT_NOTE)
+yCol    = input.color(#FF7043, "Line colour / width / style", inline = "yl", group = gY)
+yWid    = input.int(3, "", minval = 1, maxval = 5, inline = "yl", group = gY)
+ySty    = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], inline = "yl", group = gY)
+yBCol   = input.color(#FF704366, "Band colour", group = gY)
+yFill   = input.bool(false, "Fill between +1 / -1 bands", group = gY)
+yPrevOn = input.bool(false, "Show previous year's final VWAP", group = gY)
+
+// ---- Display -----------------------------------------------------------------
+hideDailyHTF = input.bool(true, "Hide Daily VWAP on 1D and above", group = gX)
+showLbls     = input.bool(true, "Right-edge labels", group = gX)
+lblOff       = input.int(3, "Label offset (bars)", minval = 0, maxval = 50, group = gX)
+warnCol      = input.color(#FF5252, "Warning colour", group = gX)
+
+dLs = dSty == "Dashed" ? plot.linestyle_dashed : dSty == "Dotted" ? plot.linestyle_dotted : plot.linestyle_solid
+wLs = wSty == "Dashed" ? plot.linestyle_dashed : wSty == "Dotted" ? plot.linestyle_dotted : plot.linestyle_solid
+mLs = mSty == "Dashed" ? plot.linestyle_dashed : mSty == "Dotted" ? plot.linestyle_dotted : plot.linestyle_solid
+yLs = ySty == "Dashed" ? plot.linestyle_dashed : ySty == "Dotted" ? plot.linestyle_dotted : plot.linestyle_solid
+
+// =============================== SESSION ENGINE ==============================
+// kind: "exchange" (exchange trading day, regular-session bars) | "anchor" (24h day) | "str" (session string)
+f_resolve() =>
+    string kind = "exchange"
+    string sStr = "0000-0000"
+    string tz   = syminfo.timezone
+    string aStr = "0000-0000"
+    string aTz  = "UTC"
+    root = syminfo.root
+    pref = syminfo.prefix
+    isCrypto = syminfo.type == "crypto"
+    isUSFut  = syminfo.type == "futures" and (root == "ES" or root == "MES" or root == "NQ" or root == "MNQ" or root == "YM" or root == "MYM" or root == "RTY" or root == "M2K" or root == "CL" or root == "MCL" or root == "GC" or root == "MGC")
+    rthStr   = root == "CL" or root == "MCL" ? "0900-1430" : root == "GC" or root == "MGC" ? "0820-1330" : "0930-1600"
+    aStrC = cryptoAnchor == "UTC 00:00" ? "0000-0000" : cryptoAnchor == "US open 09:30 NY" ? "0930-0930" : cryptoCustom
+    aTzC  = cryptoAnchor == "US open 09:30 NY" ? "America/New_York" : cryptoAnchor == "Custom" ? customTZ : "UTC"
+    if sessionMode == "Custom"
+        is24 = str.substring(customSess, 0, 4) == str.substring(customSess, 5, 9)
+        kind := is24 ? "anchor" : "str"
+        sStr := customSess
+        tz   := customTZ
+        aStr := customSess
+        aTz  := customTZ
+    else if sessionMode == "Full 24h"
+        kind := "anchor"
+        aStr := "0000-0000"
+        aTz  := syminfo.timezone
+    else if isCrypto
+        kind := "anchor"
+        aStr := aStrC
+        aTz  := aTzC
+    else if sessionMode == "Exchange session"
+        kind := "exchange"
+    else if pref == "NSE" or pref == "BSE"
+        kind := "str"
+        sStr := "0915-1530"
+        tz   := "Asia/Kolkata"
+    else if isUSFut and (sessionMode == "Main session (RTH)" or usFutBasis == "RTH")
+        kind := "str"
+        sStr := rthStr
+        tz   := "America/New_York"
+    else
+        kind := "exchange"   // MCX, US futures Globex, stocks, others
+    [kind, sStr, tz, aStr, aTz]
+
+[sKind, sStr, sTz, aStr, aTz] = f_resolve()
+
+anchorTime = time("1D", aStr, aTz)
+strTime    = time(timeframe.period, sStr, sTz)
+dayChg     = timeframe.change("1D")
+inSess     = sKind == "exchange" ? session.ismarket : sKind == "anchor" ? true : not na(strTime)
+dNew       = sKind == "anchor" ? (ta.change(anchorTime) != 0 and bar_index > 0) : sKind == "exchange" ? dayChg : (inSess and not inSess[1])
+
+wNew = timeframe.change("W")
+mNew = timeframe.change("M")
+yNew = timeframe.change("12M")
+tW   = time("W")
+tM   = time("M")
+tY   = time("12M")
+
+// =============================== HELPERS ====================================
+f_acc(bool reset, bool take, float p, float v) =>
+    var float sv   = 0.0
+    var float spv  = 0.0
+    var float spv2 = 0.0
+    if reset
+        sv   := 0.0
+        spv  := 0.0
+        spv2 := 0.0
+    if take and not na(p)
+        sv   += v
+        spv  += v * p
+        spv2 += v * p * p
+    [spv, spv2, sv]
+
+// true once history contains the first bar of the current period
+f_reach(bool chg, int t0) =>
+    var bool r = false
+    if bar_index == 0
+        r := not na(t0) and time == t0
+    else if chg
+        r := true
+    r
+
+f_stats(float pv, float pv2, float sv) =>
+    float vw = sv > 0 ? pv / sv : na
+    float sd = sv > 0 ? math.sqrt(math.max(pv2 / sv - vw * vw, 0.0)) : na
+    [vw, sd]
+
+// previous period's final VWAP (na if that period was incomplete)
+f_prev(bool newP, float vw, bool complete) =>
+    var float lastV = na
+    var bool  lastC = false
+    var float prevV = na
+    if newP
+        prevV := lastC ? lastV : na
+        lastV := na
+        lastC := false
+    if not na(vw)
+        lastV := vw
+        lastC := complete
+    prevV
+
+// HTF context: sums of CONFIRMED bars ([1]) + whether the current HTF bar starts a new period
+f_htfAcc(simple string anc) =>
+    t0  = time(anc)
+    chg = timeframe.change(anc)
+    [pv, pv2, sv] = f_acc(chg, true, src, nz(volume))
+    reach = f_reach(chg, t0)
+    [pv[1], pv2[1], sv[1], reach, chg]
+
+f_htf60() =>
+    [a1, a2, a3, a4, a5] = f_htfAcc("W")
+    [b1, b2, b3, b4, b5] = f_htfAcc("M")
+    [a1, a2, a3, a4, a5, b1, b2, b3, b4, b5]
+
+// =============================== CALCULATION ================================
+vol = nz(volume)
+var float cumVol = 0.0
+cumVol += vol
+
+tfSec = timeframe.in_seconds()
+canWM = tfSec < 3600 and 3600 % tfSec == 0     // 60m fallback only helps on lower chart TFs
+canY  = timeframe.isintraday                    // 1D fallback
+
+// chart-bar accumulators
+[dPV, dPV2, dSV]    = f_acc(dNew, inSess, src, vol)
+[wPVc, wPV2c, wSVc] = f_acc(wNew, true, src, vol)
+[mPVc, mPV2c, mSVc] = f_acc(mNew, true, src, vol)
+[yPVc, yPV2c, ySVc] = f_acc(yNew, true, src, vol)
+// chart bars inside the still-open HTF bar
+[hPV, hPV2, hSV]    = f_acc(timeframe.change("60"), true, src, vol)
+[xPV, xPV2, xSV]    = f_acc(timeframe.change("1D"), true, src, vol)
+
+// HTF sums (confirmed bars only -> non-repainting)
+[wHPV, wHPV2, wHSV, wHReach, wHChg, mHPV, mHPV2, mHSV, mHReach, mHChg] = request.security(syminfo.tickerid, "60", f_htf60(), lookahead = barmerge.lookahead_on)
+[yHPV, yHPV2, yHSV, yHReach, yHChg] = request.security(syminfo.tickerid, "1D", f_htfAcc("12M"), lookahead = barmerge.lookahead_on)
+
+dCR = f_reach(dNew, int(na))
+wCR = f_reach(wNew, tW)
+mCR = f_reach(mNew, tM)
+yCR = f_reach(yNew, tY)
+
+wUse = not wCR and canWM
+mUse = not mCR and canWM
+yUse = not yCR and canY
+
+wPV  = wUse ? (wHChg ? 0.0 : nz(wHPV))  + hPV  : wPVc
+wPV2 = wUse ? (wHChg ? 0.0 : nz(wHPV2)) + hPV2 : wPV2c
+wSV  = wUse ? (wHChg ? 0.0 : nz(wHSV))  + hSV  : wSVc
+mPV  = mUse ? (mHChg ? 0.0 : nz(mHPV))  + hPV  : mPVc
+mPV2 = mUse ? (mHChg ? 0.0 : nz(mHPV2)) + hPV2 : mPV2c
+mSV  = mUse ? (mHChg ? 0.0 : nz(mHSV))  + hSV  : mSVc
+yPV  = yUse ? (yHChg ? 0.0 : nz(yHPV))  + xPV  : yPVc
+yPV2 = yUse ? (yHChg ? 0.0 : nz(yHPV2)) + xPV2 : yPV2c
+ySV  = yUse ? (yHChg ? 0.0 : nz(yHSV))  + xSV  : ySVc
+
+dOK = dCR
+wOK = wCR or (wUse and wHReach)
+mOK = mCR or (mUse and mHReach)
+yOK = yCR or (yUse and yHReach)
+
+INC = " (incomplete)"
+dTag = dOK ? "" : INC
+wTag = wCR ? "" : wOK ? " (HTF calc)" : INC
+mTag = mCR ? "" : mOK ? " (HTF calc)" : INC
+yTag = yCR ? "" : yOK ? " (HTF calc)" : INC
+
+[dVW, dSD] = f_stats(dPV, dPV2, dSV)
+[wVW, wSD] = f_stats(wPV, wPV2, wSV)
+[mVW, mSD] = f_stats(mPV, mPV2, mSV)
+[yVW, ySD] = f_stats(yPV, yPV2, ySV)
+
+dU = dMode == "Percentage" ? dVW / 100.0 : dSD
+wU = wMode == "Percentage" ? wVW / 100.0 : wSD
+mU = mMode == "Percentage" ? mVW / 100.0 : mSD
+yU = yMode == "Percentage" ? yVW / 100.0 : ySD
+
+hideD = hideDailyHTF and tfSec >= 86400
+dOn = dShow and not hideD
+dVal = dOn and inSess ? dVW : na
+wVal = wShow ? wVW : na
+mVal = mShow ? mVW : na
+yVal = yShow ? yVW : na
+
+dbOn = dShowB and not na(dVal)
+wbOn = wShowB and not na(wVal)
+mbOn = mShowB and not na(mVal)
+ybOn = yShowB and not na(yVal)
+
+dU1 = dbOn and dB1 ? dVW + dM1 * dU : na
+dL1 = dbOn and dB1 ? dVW - dM1 * dU : na
+dU2 = dbOn and dB2 ? dVW + dM2 * dU : na
+dL2 = dbOn and dB2 ? dVW - dM2 * dU : na
+dU3 = dbOn and dB3 ? dVW + dM3 * dU : na
+dL3 = dbOn and dB3 ? dVW - dM3 * dU : na
+
+wU1 = wbOn and wB1 ? wVW + wM1 * wU : na
+wL1 = wbOn and wB1 ? wVW - wM1 * wU : na
+wU2 = wbOn and wB2 ? wVW + wM2 * wU : na
+wL2 = wbOn and wB2 ? wVW - wM2 * wU : na
+wU3 = wbOn and wB3 ? wVW + wM3 * wU : na
+wL3 = wbOn and wB3 ? wVW - wM3 * wU : na
+
+mU1 = mbOn and mB1 ? mVW + mM1 * mU : na
+mL1 = mbOn and mB1 ? mVW - mM1 * mU : na
+mU2 = mbOn and mB2 ? mVW + mM2 * mU : na
+mL2 = mbOn and mB2 ? mVW - mM2 * mU : na
+mU3 = mbOn and mB3 ? mVW + mM3 * mU : na
+mL3 = mbOn and mB3 ? mVW - mM3 * mU : na
+
+yU1 = ybOn and yB1 ? yVW + yM1 * yU : na
+yL1 = ybOn and yB1 ? yVW - yM1 * yU : na
+yU2 = ybOn and yB2 ? yVW + yM2 * yU : na
+yL2 = ybOn and yB2 ? yVW - yM2 * yU : na
+yU3 = ybOn and yB3 ? yVW + yM3 * yU : na
+yL3 = ybOn and yB3 ? yVW - yM3 * yU : na
+
+dPrevV = f_prev(dNew, inSess ? dVW : na, dOK)
+wPrevV = f_prev(wNew, wVW, wOK)
+mPrevV = f_prev(mNew, mVW, mOK)
+yPrevV = f_prev(yNew, yVW, yOK)
+
+dPrev = dOn and dPrevOn ? dPrevV : na
+wPrev = wShow and wPrevOn ? wPrevV : na
+mPrev = mShow and mPrevOn ? mPrevV : na
+yPrev = yShow and yPrevOn ? yPrevV : na
+
+// =============================== PLOTS ======================================
+// Plot budget (limit 64). TradingView adds an extra count for a non-constant
+// colour, so: no series colours anywhere; values are na on the reset bar
+// (plot.style_linebr then leaves a gap instead of a vertical joiner); fills use
+// a constant colour and are switched with `display`; previous-period VWAPs are
+// line objects, not plots. Worst case: 28 plots x 2 + 4 fills = 60.
+plot(dNew ? na : dVal, "Daily VWAP", dCol, dWid, plot.style_linebr, linestyle = dLs)
+pdU1 = plot(dNew ? na : dU1, "d+1", dBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+pdL1 = plot(dNew ? na : dL1, "d-1", dBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(dNew ? na : dU2, "d+2", dBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(dNew ? na : dL2, "d-2", dBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(dNew ? na : dU3, "d+3", dBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(dNew ? na : dL3, "d-3", dBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+fill(pdU1, pdL1, #4DD0E114, "Daily +-1 fill", display = dFill ? display.all : display.none)
+
+plot(wNew ? na : wVal, "Weekly VWAP", wCol, wWid, plot.style_linebr, linestyle = wLs)
+pwU1 = plot(wNew ? na : wU1, "w+1", wBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+pwL1 = plot(wNew ? na : wL1, "w-1", wBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(wNew ? na : wU2, "w+2", wBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(wNew ? na : wL2, "w-2", wBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(wNew ? na : wU3, "w+3", wBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(wNew ? na : wL3, "w-3", wBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+fill(pwU1, pwL1, #FFC10714, "Weekly +-1 fill", display = wFill ? display.all : display.none)
+
+plot(mNew ? na : mVal, "Monthly VWAP", mCol, mWid, plot.style_linebr, linestyle = mLs)
+pmU1 = plot(mNew ? na : mU1, "m+1", mBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+pmL1 = plot(mNew ? na : mL1, "m-1", mBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(mNew ? na : mU2, "m+2", mBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(mNew ? na : mL2, "m-2", mBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(mNew ? na : mU3, "m+3", mBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(mNew ? na : mL3, "m-3", mBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+fill(pmU1, pmL1, #BA68C814, "Monthly +-1 fill", display = mFill ? display.all : display.none)
+
+plot(yNew ? na : yVal, "Yearly VWAP", yCol, yWid, plot.style_linebr, linestyle = yLs)
+pyU1 = plot(yNew ? na : yU1, "y+1", yBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+pyL1 = plot(yNew ? na : yL1, "y-1", yBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(yNew ? na : yU2, "y+2", yBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(yNew ? na : yL2, "y-2", yBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(yNew ? na : yU3, "y+3", yBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+plot(yNew ? na : yL3, "y-3", yBCol, 1, plot.style_linebr, linestyle = plot.linestyle_dotted, display = display.pane)
+fill(pyU1, pyL1, #FF704314, "Yearly +-1 fill", display = yFill ? display.all : display.none)
+
+// =============================== LABELS =====================================
+f_mkLbls() =>
+    array<label> a = array.new<label>()
+    for i = 0 to 7
+        a.push(label.new(bar_index, na, "", color = color(na), style = label.style_label_left, size = size.tiny))
+    a
+
+f_setLbl(label lb, float y, string txt, color c) =>
+    if na(y) or not showLbls
+        label.set_text(lb, "")
+        label.set_xy(lb, bar_index, na)
+    else
+        label.set_xy(lb, bar_index + lblOff, y)
+        label.set_text(lb, txt)
+        label.set_textcolor(lb, c)
+
+f_drawSet(array<label> a, string p, float vw, float u1, float l1, float u2, float l2, float u3, float l3, float pv, color c, string tag) =>
+    f_setLbl(a.get(0), vw, p + "VWAP" + tag, tag == INC ? warnCol : c)
+    f_setLbl(a.get(1), u1, p + "+1", c)
+    f_setLbl(a.get(2), l1, p + "-1", c)
+    f_setLbl(a.get(3), u2, p + "+2", c)
+    f_setLbl(a.get(4), l2, p + "-2", c)
+    f_setLbl(a.get(5), u3, p + "+3", c)
+    f_setLbl(a.get(6), l3, p + "-3", c)
+    f_setLbl(a.get(7), pv, "p" + p + "VWAP", c)
+
+var array<label> dLbls = f_mkLbls()
+var array<label> wLbls = f_mkLbls()
+var array<label> mLbls = f_mkLbls()
+var array<label> yLbls = f_mkLbls()
+// previous period's final VWAP: flat dashed line from the current period's first bar to the right edge.
+// Uses xloc.bar_time: a bar_index x-coordinate may not be more than 9,999 bars from the current bar,
+// which a monthly/yearly start on an intraday chart easily exceeds.
+f_start(bool newP) =>
+    var int s = time
+    if newP
+        s := time
+    s
+
+f_prevLine(line ln, int t1, float y) =>
+    if na(y)
+        line.set_xy1(ln, time, na)
+        line.set_xy2(ln, time, na)
+    else
+        line.set_xy1(ln, t1, y)
+        line.set_xy2(ln, time + lblOff * tfSec * 1000, y)
+
+dStart = f_start(dNew)
+wStart = f_start(wNew)
+mStart = f_start(mNew)
+yStart = f_start(yNew)
+var line dPL = line.new(time, na, time, na, xloc = xloc.bar_time, color = color.new(dCol, 35), style = line.style_dashed, width = 1)
+var line wPL = line.new(time, na, time, na, xloc = xloc.bar_time, color = color.new(wCol, 35), style = line.style_dashed, width = 1)
+var line mPL = line.new(time, na, time, na, xloc = xloc.bar_time, color = color.new(mCol, 35), style = line.style_dashed, width = 1)
+var line yPL = line.new(time, na, time, na, xloc = xloc.bar_time, color = color.new(yCol, 35), style = line.style_dashed, width = 1)
+var label noVolLbl = label.new(bar_index, na, "", yloc = yloc.abovebar, color = color(na), style = label.style_label_down, size = size.small)
+
+if barstate.islast
+    f_drawSet(dLbls, "d", dVal, dU1, dL1, dU2, dL2, dU3, dL3, dPrev, dCol, dTag)
+    f_drawSet(wLbls, "w", wVal, wU1, wL1, wU2, wL2, wU3, wL3, wPrev, wCol, wTag)
+    f_drawSet(mLbls, "m", mVal, mU1, mL1, mU2, mL2, mU3, mL3, mPrev, mCol, mTag)
+    f_drawSet(yLbls, "y", yVal, yU1, yL1, yU2, yL2, yU3, yL3, yPrev, yCol, yTag)
+    f_prevLine(dPL, dStart, dPrev)
+    f_prevLine(wPL, wStart, wPrev)
+    f_prevLine(mPL, mStart, mPrev)
+    f_prevLine(yPL, yStart, yPrev)
+    if cumVol == 0
+        label.set_xy(noVolLbl, bar_index, high)
+        label.set_text(noVolLbl, "No volume: VWAP not meaningful, use futures (e.g. NIFTY1!)")
+        label.set_textcolor(noVolLbl, warnCol)
+    else
+        label.set_text(noVolLbl, "")
+        label.set_xy(noVolLbl, bar_index, na)

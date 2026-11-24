@@ -1,0 +1,182 @@
+//@version=6
+indicator("Key Levels (D/W/M/Y)", shorttitle = "Key Levels", overlay = true, max_lines_count = 100, max_labels_count = 100)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+const string GL = "Levels  (show · colour · style)"
+const string GD = "Display"
+
+showD   = input.bool(true,  "Today H/L        ", group = GL, inline = "d")
+colD    = input.color(#4DD0E1, "", group = GL, inline = "d")
+styD    = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], group = GL, inline = "d")
+
+showPD  = input.bool(true,  "Previous day H/L ", group = GL, inline = "pd")
+colPD   = input.color(#FFC107, "", group = GL, inline = "pd")
+styPD   = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], group = GL, inline = "pd")
+
+showW   = input.bool(true,  "This week H/L    ", group = GL, inline = "w")
+colW    = input.color(#66BB6A, "", group = GL, inline = "w")
+styW    = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], group = GL, inline = "w")
+
+showPW  = input.bool(false, "Previous week H/L", group = GL, inline = "pw")
+colPW   = input.color(#66BB6A, "", group = GL, inline = "pw")
+styPW   = input.string("Dotted", "", options = ["Solid", "Dashed", "Dotted"], group = GL, inline = "pw")
+
+showM   = input.bool(true,  "This month H/L   ", group = GL, inline = "m")
+colM    = input.color(#BA68C8, "", group = GL, inline = "m")
+styM    = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], group = GL, inline = "m")
+
+showPM  = input.bool(false, "Previous month H/L", group = GL, inline = "pm")
+colPM   = input.color(#BA68C8, "", group = GL, inline = "pm")
+styPM   = input.string("Dotted", "", options = ["Solid", "Dashed", "Dotted"], group = GL, inline = "pm")
+
+showY   = input.bool(true,  "This year H/L    ", group = GL, inline = "y")
+colY    = input.color(#EF5350, "", group = GL, inline = "y")
+styY    = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], group = GL, inline = "y")
+
+showPY  = input.bool(false, "Previous year H/L", group = GL, inline = "py")
+colPY   = input.color(#EF5350, "", group = GL, inline = "py")
+styPY   = input.string("Dotted", "", options = ["Solid", "Dashed", "Dotted"], group = GL, inline = "py")
+
+extMode = input.string("From period start", "Line start", options = ["From period start", "Right edge only"], group = GD, tooltip = "From period start: each line begins where its day/week/month/year began. Right edge only: short lines near the last bar.")
+edgeLen = input.int(30, "Right-edge line length (bars)", minval = 1, maxval = 500, group = GD)
+extR    = input.int(8, "Extend right (bars)", minval = 0, maxval = 100, group = GD)
+lineW   = input.int(1, "Line width", minval = 1, maxval = 4, group = GD)
+showLbl = input.bool(true, "Labels", group = GD, inline = "lb")
+showPx  = input.bool(true, "with price", group = GD, inline = "lb")
+lblSize = input.string("small", "Label size", options = ["tiny", "small", "normal"], group = GD)
+mergeTk = input.int(2, "Merge labels within (ticks)", minval = 0, group = GD, tooltip = "Levels this close together share one label, e.g. \"DH / WH\".")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+// [current H, current L, current period start, previous H, previous L, previous period start]
+// lookahead_on: current-period values are only drawn on the last bar, where they equal
+// the live (developing) high/low. Previous-period values use [1] → confirmed, no repaint.
+f_hl(simple string tf) =>
+    request.security(syminfo.tickerid, tf, [high, low, time, high[1], low[1], time[1]], lookahead = barmerge.lookahead_on)
+
+f_style(string s) =>
+    switch s
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        => line.style_solid
+
+f_size(string s) =>
+    switch s
+        "tiny"   => size.tiny
+        "normal" => size.normal
+        => size.small
+
+f_add(array<float> p, array<string> n, array<color> c, array<int> t, array<string> s, bool show, float price, string name, color col, int t0, string sty) =>
+    if show and not na(price)
+        p.push(price)
+        n.push(name)
+        c.push(col)
+        t.push(t0)
+        s.push(sty)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATA
+// ═══════════════════════════════════════════════════════════════════════════
+[dH, dL, dT, pdH, pdL, pdT] = f_hl("D")
+[wH, wL, wT, pwH, pwL, pwT] = f_hl("W")
+[mH, mL, mT, pmH, pmL, pmT] = f_hl("M")
+[yH, yL, yT, pyH, pyL, pyT] = f_hl("12M")
+
+// Hide periods shorter than the chart timeframe (e.g. day levels on a weekly chart)
+int  chSec = timeframe.in_seconds()
+bool okD   = chSec <= timeframe.in_seconds("D")
+bool okW   = chSec <= timeframe.in_seconds("W")
+bool okM   = chSec <= timeframe.in_seconds("M")
+bool okY   = chSec <= timeframe.in_seconds("12M")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DRAWING (last bar only)
+// ═══════════════════════════════════════════════════════════════════════════
+var array<line>  lns = array.new<line>()
+var array<label> lbs = array.new<label>()
+
+if barstate.islast
+    for x in lns
+        line.delete(x)
+    lns.clear()
+    for x in lbs
+        label.delete(x)
+    lbs.clear()
+
+    array<float>  lp = array.new<float>()
+    array<string> ln = array.new<string>()
+    array<color>  lc = array.new<color>()
+    array<int>    lt = array.new<int>()
+    array<string> ls = array.new<string>()
+
+    f_add(lp, ln, lc, lt, ls, showD  and okD, dH,  "DH",  colD,  dT,  styD)
+    f_add(lp, ln, lc, lt, ls, showD  and okD, dL,  "DL",  colD,  dT,  styD)
+    f_add(lp, ln, lc, lt, ls, showPD and okD, pdH, "PDH", colPD, pdT, styPD)
+    f_add(lp, ln, lc, lt, ls, showPD and okD, pdL, "PDL", colPD, pdT, styPD)
+    f_add(lp, ln, lc, lt, ls, showW  and okW, wH,  "WH",  colW,  wT,  styW)
+    f_add(lp, ln, lc, lt, ls, showW  and okW, wL,  "WL",  colW,  wT,  styW)
+    f_add(lp, ln, lc, lt, ls, showPW and okW, pwH, "PWH", colPW, pwT, styPW)
+    f_add(lp, ln, lc, lt, ls, showPW and okW, pwL, "PWL", colPW, pwT, styPW)
+    f_add(lp, ln, lc, lt, ls, showM  and okM, mH,  "MH",  colM,  mT,  styM)
+    f_add(lp, ln, lc, lt, ls, showM  and okM, mL,  "ML",  colM,  mT,  styM)
+    f_add(lp, ln, lc, lt, ls, showPM and okM, pmH, "PMH", colPM, pmT, styPM)
+    f_add(lp, ln, lc, lt, ls, showPM and okM, pmL, "PML", colPM, pmT, styPM)
+    f_add(lp, ln, lc, lt, ls, showY  and okY, yH,  "YH",  colY,  yT,  styY)
+    f_add(lp, ln, lc, lt, ls, showY  and okY, yL,  "YL",  colY,  yT,  styY)
+    f_add(lp, ln, lc, lt, ls, showPY and okY, pyH, "PYH", colPY, pyT, styPY)
+    f_add(lp, ln, lc, lt, ls, showPY and okY, pyL, "PYL", colPY, pyT, styPY)
+
+    int barMs = chSec * 1000
+    int xEnd  = time + extR * barMs
+    int xEdge = time[math.min(edgeLen, bar_index)]
+    int n     = lp.size()
+
+    if n > 0
+        // Lines
+        for i = 0 to n - 1
+            int x1 = extMode == "From period start" ? math.min(lt.get(i), time) : xEdge
+            lns.push(line.new(x1, lp.get(i), xEnd, lp.get(i), xloc = xloc.bar_time, color = lc.get(i), style = f_style(ls.get(i)), width = lineW))
+
+        // Labels — sorted high → low, levels within the tolerance share one label
+        if showLbl
+            array<int> ord = lp.sort_indices(order.descending)
+            float tol = mergeTk * syminfo.mintick
+            int   k   = 0
+            while k < n
+                int    i0  = ord.get(k)
+                float  px  = lp.get(i0)
+                string txt = ln.get(i0)
+                color  col = lc.get(i0)
+                int    k2  = k + 1
+                while k2 < n and math.abs(lp.get(ord.get(k2)) - px) <= tol
+                    txt += " / " + ln.get(ord.get(k2))
+                    k2 += 1
+                if showPx
+                    txt += "  " + str.tostring(px, format.mintick)
+                lbs.push(label.new(xEnd, px, txt, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = col, size = f_size(lblSize)))
+                k := k2
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALERTS — previous-period levels (confirmed values, no repaint)
+// ═══════════════════════════════════════════════════════════════════════════
+bool xPDH = ta.cross(close, pdH)
+bool xPDL = ta.cross(close, pdL)
+bool xPWH = ta.cross(close, pwH)
+bool xPWL = ta.cross(close, pwL)
+bool xPMH = ta.cross(close, pmH)
+bool xPML = ta.cross(close, pmL)
+bool xPYH = ta.cross(close, pyH)
+bool xPYL = ta.cross(close, pyL)
+
+alertcondition(xPDH, "Cross previous day high",   "{{ticker}}: price crossed PREVIOUS DAY HIGH at {{close}}")
+alertcondition(xPDL, "Cross previous day low",    "{{ticker}}: price crossed PREVIOUS DAY LOW at {{close}}")
+alertcondition(xPWH, "Cross previous week high",  "{{ticker}}: price crossed PREVIOUS WEEK HIGH at {{close}}")
+alertcondition(xPWL, "Cross previous week low",   "{{ticker}}: price crossed PREVIOUS WEEK LOW at {{close}}")
+alertcondition(xPMH, "Cross previous month high", "{{ticker}}: price crossed PREVIOUS MONTH HIGH at {{close}}")
+alertcondition(xPML, "Cross previous month low",  "{{ticker}}: price crossed PREVIOUS MONTH LOW at {{close}}")
+alertcondition(xPYH, "Cross previous year high",  "{{ticker}}: price crossed PREVIOUS YEAR HIGH at {{close}}")
+alertcondition(xPYL, "Cross previous year low",   "{{ticker}}: price crossed PREVIOUS YEAR LOW at {{close}}")
+alertcondition(xPDH or xPDL or xPWH or xPWL or xPMH or xPML or xPYH or xPYL, "Cross any previous-period level", "{{ticker}}: price crossed a previous day/week/month/year high or low at {{close}}")

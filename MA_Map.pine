@@ -1,0 +1,407 @@
+//@version=6
+indicator("MA Map", shorttitle = "MA Map", overlay = true, max_labels_count = 50)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+const color  C_UP   = #66BB6A
+const color  C_DN   = #EF5350
+const color  C_AT   = #FFC107
+const color  C_FLAT = #9E9E9E
+
+const string G1 = "Slot 1"
+const string G2 = "Slot 2"
+const string G3 = "Slot 3"
+const string G4 = "Slot 4"
+const string G5 = "Slot 5"
+const string G6 = "Slot 6"
+const string G7 = "Slot 7"
+const string G8 = "Slot 8"
+const string GT = "Table"
+const string GD = "Display"
+const string GA = "Alerts"
+
+const string TT_TF = "Chart = chart timeframe. A higher timeframe (D, W …) uses the last CONFIRMED bar of that timeframe, so it never repaints. Pick a timeframe ≥ the chart's."
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS — SLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+s1On  = input.bool(true, "On", group = G1, inline = "1a")
+s1Typ = input.string("EMA", "", options = ["EMA", "SMA", "WMA", "VWMA", "HMA", "RMA"], group = G1, inline = "1a")
+s1Len = input.int(9, "", minval = 1, group = G1, inline = "1a")
+s1Tf  = input.timeframe("", "", group = G1, inline = "1a", tooltip = TT_TF)
+s1Src = input.source(close, "Source", group = G1, inline = "1b")
+s1Plt = input.bool(true, "Plot", group = G1, inline = "1b")
+s1Col = input.color(#4DD0E1, "", group = G1, inline = "1b")
+s1W   = input.int(1, "W", minval = 1, maxval = 4, group = G1, inline = "1b")
+
+s2On  = input.bool(true, "On", group = G2, inline = "2a")
+s2Typ = input.string("EMA", "", options = ["EMA", "SMA", "WMA", "VWMA", "HMA", "RMA"], group = G2, inline = "2a")
+s2Len = input.int(21, "", minval = 1, group = G2, inline = "2a")
+s2Tf  = input.timeframe("", "", group = G2, inline = "2a", tooltip = TT_TF)
+s2Src = input.source(close, "Source", group = G2, inline = "2b")
+s2Plt = input.bool(true, "Plot", group = G2, inline = "2b")
+s2Col = input.color(#26A69A, "", group = G2, inline = "2b")
+s2W   = input.int(1, "W", minval = 1, maxval = 4, group = G2, inline = "2b")
+
+s3On  = input.bool(true, "On", group = G3, inline = "3a")
+s3Typ = input.string("EMA", "", options = ["EMA", "SMA", "WMA", "VWMA", "HMA", "RMA"], group = G3, inline = "3a")
+s3Len = input.int(50, "", minval = 1, group = G3, inline = "3a")
+s3Tf  = input.timeframe("", "", group = G3, inline = "3a", tooltip = TT_TF)
+s3Src = input.source(close, "Source", group = G3, inline = "3b")
+s3Plt = input.bool(true, "Plot", group = G3, inline = "3b")
+s3Col = input.color(#FFC107, "", group = G3, inline = "3b")
+s3W   = input.int(2, "W", minval = 1, maxval = 4, group = G3, inline = "3b")
+
+s4On  = input.bool(false, "On", group = G4, inline = "4a")
+s4Typ = input.string("EMA", "", options = ["EMA", "SMA", "WMA", "VWMA", "HMA", "RMA"], group = G4, inline = "4a")
+s4Len = input.int(100, "", minval = 1, group = G4, inline = "4a")
+s4Tf  = input.timeframe("", "", group = G4, inline = "4a", tooltip = TT_TF)
+s4Src = input.source(close, "Source", group = G4, inline = "4b")
+s4Plt = input.bool(true, "Plot", group = G4, inline = "4b")
+s4Col = input.color(#BA68C8, "", group = G4, inline = "4b")
+s4W   = input.int(2, "W", minval = 1, maxval = 4, group = G4, inline = "4b")
+
+s5On  = input.bool(true, "On", group = G5, inline = "5a")
+s5Typ = input.string("EMA", "", options = ["EMA", "SMA", "WMA", "VWMA", "HMA", "RMA"], group = G5, inline = "5a")
+s5Len = input.int(200, "", minval = 1, group = G5, inline = "5a")
+s5Tf  = input.timeframe("", "", group = G5, inline = "5a", tooltip = TT_TF)
+s5Src = input.source(close, "Source", group = G5, inline = "5b")
+s5Plt = input.bool(true, "Plot", group = G5, inline = "5b")
+s5Col = input.color(#FF7043, "", group = G5, inline = "5b")
+s5W   = input.int(2, "W", minval = 1, maxval = 4, group = G5, inline = "5b")
+
+s6On  = input.bool(false, "On", group = G6, inline = "6a")
+s6Typ = input.string("SMA", "", options = ["EMA", "SMA", "WMA", "VWMA", "HMA", "RMA"], group = G6, inline = "6a")
+s6Len = input.int(50, "", minval = 1, group = G6, inline = "6a")
+s6Tf  = input.timeframe("D", "", group = G6, inline = "6a", tooltip = TT_TF)
+s6Src = input.source(close, "Source", group = G6, inline = "6b")
+s6Plt = input.bool(true, "Plot", group = G6, inline = "6b")
+s6Col = input.color(#FFD54F, "", group = G6, inline = "6b")
+s6W   = input.int(1, "W", minval = 1, maxval = 4, group = G6, inline = "6b")
+
+s7On  = input.bool(true, "On", group = G7, inline = "7a")
+s7Typ = input.string("SMA", "", options = ["EMA", "SMA", "WMA", "VWMA", "HMA", "RMA"], group = G7, inline = "7a")
+s7Len = input.int(200, "", minval = 1, group = G7, inline = "7a")
+s7Tf  = input.timeframe("D", "", group = G7, inline = "7a", tooltip = TT_TF)
+s7Src = input.source(close, "Source", group = G7, inline = "7b")
+s7Plt = input.bool(true, "Plot", group = G7, inline = "7b")
+s7Col = input.color(#EF5350, "", group = G7, inline = "7b")
+s7W   = input.int(3, "W", minval = 1, maxval = 4, group = G7, inline = "7b")
+
+s8On  = input.bool(false, "On", group = G8, inline = "8a")
+s8Typ = input.string("EMA", "", options = ["EMA", "SMA", "WMA", "VWMA", "HMA", "RMA"], group = G8, inline = "8a")
+s8Len = input.int(20, "", minval = 1, group = G8, inline = "8a")
+s8Tf  = input.timeframe("W", "", group = G8, inline = "8a", tooltip = TT_TF)
+s8Src = input.source(close, "Source", group = G8, inline = "8b")
+s8Plt = input.bool(true, "Plot", group = G8, inline = "8b")
+s8Col = input.color(#90A4AE, "", group = G8, inline = "8b")
+s8W   = input.int(2, "W", minval = 1, maxval = 4, group = G8, inline = "8b")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS — TABLE / DISPLAY / ALERTS
+// ═══════════════════════════════════════════════════════════════════════════
+tblPos   = input.string("Top right", "Position", options = ["Top right", "Middle right", "Bottom right", "Top left", "Middle left", "Bottom left", "Top center", "Bottom center"], group = GT)
+compact  = input.bool(false, "Compact mode (hide ATR & slope columns)", group = GT)
+slopeN   = input.int(5, "Slope lookback (bars of the MA's own timeframe)", minval = 1, group = GT)
+flatThr  = input.float(0.05, "Slope flat threshold (%)", minval = 0, step = 0.01, group = GT)
+atTol    = input.float(0.10, "\"At MA\" band (± %)", minval = 0, step = 0.01, group = GT)
+
+fontSz   = input.string("small", "Font size", options = ["tiny", "small", "normal"], group = GD)
+theme    = input.string("Dark", "Table theme", options = ["Dark", "Light"], group = GD)
+bgTransp = input.int(20, "Table background transparency", minval = 0, maxval = 90, group = GD)
+showLbl  = input.bool(true, "Name labels at line ends", group = GD)
+lblOff   = input.int(3, "Label offset (bars)", minval = 0, maxval = 50, group = GD)
+
+gcFast    = input.int(50, "Golden/death cross EMAs: fast", minval = 1, group = GA, inline = "gc")
+gcSlow    = input.int(200, "slow", minval = 1, group = GA, inline = "gc")
+dynAlerts = input.bool(true, "Also fire alert() messages with MA names", group = GA, tooltip = "Create an alert with condition \"Any alert() function call\" to receive descriptive messages (slot name, direction, value). The alertcondition() entries remain available individually.")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GLOBAL SERIES USED BY FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+float atr14     = ta.atr(14)
+bool  symHasVol = ta.cum(nz(volume)) > 0
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+// All MA types are computed every bar (keeps ta.* history consistent); the
+// selected one is returned. VWMA falls back to SMA when there is no volume.
+f_ma(string t, float src, simple int len) =>
+    bool  hv = ta.cum(nz(volume)) > 0
+    float e  = ta.ema(src, len)
+    float s  = ta.sma(src, len)
+    float w  = ta.wma(src, len)
+    float vw = ta.vwma(src, len)
+    float h  = ta.hma(src, len)
+    float r  = ta.rma(src, len)
+    switch t
+        "EMA"  => e
+        "SMA"  => s
+        "WMA"  => w
+        "VWMA" => hv and not na(vw) ? vw : s
+        "HMA"  => h
+        => r
+
+f_isChart(simple string tf) =>
+    tf == "" or timeframe.in_seconds(tf) == timeframe.in_seconds()
+
+// Returns [current MA, MA slopeN bars ago] — both in the MA's own timeframe.
+// HTF: expression offset [1] + lookahead_on = value of the last CONFIRMED HTF
+// bar on history AND in realtime (TradingView's documented non-repainting form).
+f_slot(string t, float src, simple int len, simple string tf, int n) =>
+    float v = f_ma(t, src, len)
+    [hc, hp] = request.security(syminfo.tickerid, tf, [v[1], v[1 + n]], lookahead = barmerge.lookahead_on)
+    bool  ch   = f_isChart(tf)
+    float cur  = ch ? v : hc
+    float past = ch ? v[n] : hp
+    [cur, past]
+
+f_tfLabel(simple string tf) =>
+    string out = ""
+    if not f_isChart(tf)
+        int s = timeframe.in_seconds(tf)
+        out := s >= 86400 ? " " + tf : s % 3600 == 0 ? " " + str.tostring(int(s / 3600)) + "H" : " " + str.tostring(int(s / 60)) + "m"
+    out
+
+f_name(simple string t, simple int len, simple string tf) =>
+    t + " " + str.tostring(len) + f_tfLabel(tf) + (t == "VWMA" and not symHasVol ? " (no vol)" : "")
+
+// 1 = bullish stack, -1 = bearish stack, 0 = mixed (needs ≥ 2 enabled chart-TF EMAs)
+f_stack(array<bool> on, array<string> typ, array<bool> ch, array<int> lens, array<float> vals) =>
+    array<float> ev = array.new<float>()
+    array<int>   el = array.new<int>()
+    for i = 0 to 7
+        if on.get(i) and ch.get(i) and typ.get(i) == "EMA" and not na(vals.get(i))
+            ev.push(vals.get(i))
+            el.push(lens.get(i))
+    int res = 0
+    int n   = ev.size()
+    if n >= 2
+        array<int> idx = el.sort_indices(order.ascending)
+        bool bull = true
+        bool bear = true
+        for k = 0 to n - 1
+            float cur = ev.get(idx.get(k))
+            if close <= cur
+                bull := false
+            if close >= cur
+                bear := false
+            if k > 0
+                float prev = ev.get(idx.get(k - 1))
+                if prev <= cur
+                    bull := false
+                if prev >= cur
+                    bear := false
+        res := bull ? 1 : bear ? -1 : 0
+    res
+
+f_stackTxt(int s) =>
+    s == 1 ? "Bullish stack" : s == -1 ? "Bearish stack" : "Mixed"
+
+f_pos(string p) =>
+    switch p
+        "Top right"    => position.top_right
+        "Middle right" => position.middle_right
+        "Bottom right" => position.bottom_right
+        "Top left"     => position.top_left
+        "Middle left"  => position.middle_left
+        "Bottom left"  => position.bottom_left
+        "Top center"   => position.top_center
+        => position.bottom_center
+
+f_size(string s) =>
+    switch s
+        "tiny"   => size.tiny
+        "normal" => size.normal
+        => size.small
+
+f_signed(float x, string fmt) =>
+    (x > 0 ? "+" : "") + str.tostring(x, fmt)
+
+f_cell(table t, int c, int r, string txt, color tc, color bg, string sz) =>
+    table.cell(t, c, r, txt, text_color = tc, bgcolor = bg, text_size = sz, text_halign = c == 0 ? text.align_left : text.align_right)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MA CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+[m1, p1] = f_slot(s1Typ, s1Src, s1Len, s1Tf, slopeN)
+[m2, p2] = f_slot(s2Typ, s2Src, s2Len, s2Tf, slopeN)
+[m3, p3] = f_slot(s3Typ, s3Src, s3Len, s3Tf, slopeN)
+[m4, p4] = f_slot(s4Typ, s4Src, s4Len, s4Tf, slopeN)
+[m5, p5] = f_slot(s5Typ, s5Src, s5Len, s5Tf, slopeN)
+[m6, p6] = f_slot(s6Typ, s6Src, s6Len, s6Tf, slopeN)
+[m7, p7] = f_slot(s7Typ, s7Src, s7Len, s7Tf, slopeN)
+[m8, p8] = f_slot(s8Typ, s8Src, s8Len, s8Tf, slopeN)
+
+array<bool>   aOn  = array.from(s1On, s2On, s3On, s4On, s5On, s6On, s7On, s8On)
+array<bool>   aPlt = array.from(s1Plt, s2Plt, s3Plt, s4Plt, s5Plt, s6Plt, s7Plt, s8Plt)
+array<string> aTyp = array.from(s1Typ, s2Typ, s3Typ, s4Typ, s5Typ, s6Typ, s7Typ, s8Typ)
+array<int>    aLen = array.from(s1Len, s2Len, s3Len, s4Len, s5Len, s6Len, s7Len, s8Len)
+array<bool>   aCh  = array.from(f_isChart(s1Tf), f_isChart(s2Tf), f_isChart(s3Tf), f_isChart(s4Tf), f_isChart(s5Tf), f_isChart(s6Tf), f_isChart(s7Tf), f_isChart(s8Tf))
+array<float>  aVal = array.from(m1, m2, m3, m4, m5, m6, m7, m8)
+array<float>  aPst = array.from(p1, p2, p3, p4, p5, p6, p7, p8)
+array<color>  aCol = array.from(s1Col, s2Col, s3Col, s4Col, s5Col, s6Col, s7Col, s8Col)
+array<string> aNm  = array.from(f_name(s1Typ, s1Len, s1Tf), f_name(s2Typ, s2Len, s2Tf), f_name(s3Typ, s3Len, s3Tf), f_name(s4Typ, s4Len, s4Tf), f_name(s5Typ, s5Len, s5Tf), f_name(s6Typ, s6Len, s6Tf), f_name(s7Typ, s7Len, s7Tf), f_name(s8Typ, s8Len, s8Tf))
+
+int stack     = f_stack(aOn, aTyp, aCh, aLen, aVal)
+int prevStack = nz(stack[1])
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+plot(s1On and s1Plt ? m1 : na, "MA 1", s1Col, s1W)
+plot(s2On and s2Plt ? m2 : na, "MA 2", s2Col, s2W)
+plot(s3On and s3Plt ? m3 : na, "MA 3", s3Col, s3W)
+plot(s4On and s4Plt ? m4 : na, "MA 4", s4Col, s4W)
+plot(s5On and s5Plt ? m5 : na, "MA 5", s5Col, s5W)
+plot(s6On and s6Plt ? m6 : na, "MA 6", s6Col, s6W)
+plot(s7On and s7Plt ? m7 : na, "MA 7", s7Col, s7W)
+plot(s8On and s8Plt ? m8 : na, "MA 8", s8Col, s8W)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TABLE + LABELS (last bar only)
+// ═══════════════════════════════════════════════════════════════════════════
+var table        tbl  = na
+var array<label> lbls = array.new<label>()
+
+if barstate.islast
+    bool   isDark = theme == "Dark"
+    color  cBg    = isDark ? color.new(#131722, bgTransp) : color.new(#FFFFFF, bgTransp)
+    color  cHdr   = isDark ? color.new(#2A2E39, bgTransp) : color.new(#E0E3EB, bgTransp)
+    color  cTxt   = isDark ? #D1D4DC : #131722
+    color  cMute  = isDark ? #787B86 : #6A6D78
+    color  cFrm   = isDark ? #363A45 : #C9CBD1
+    color  cPxBg  = isDark ? color.new(#2962FF, 35) : color.new(#90CAF9, 20)
+    color  cPxTx  = isDark ? color.white : #0D47A1
+    string sz     = f_size(fontSz)
+    int    nCols  = compact ? 3 : 5
+
+    if not na(tbl)
+        table.delete(tbl)
+    tbl := table.new(f_pos(tblPos), nCols, 12, bgcolor = cBg, frame_color = cFrm, frame_width = 1, border_color = cFrm, border_width = 0)
+
+    // Header
+    f_cell(tbl, 0, 0, "MA", cMute, cHdr, sz)
+    f_cell(tbl, 1, 0, "Value", cMute, cHdr, sz)
+    f_cell(tbl, 2, 0, "Dist", cMute, cHdr, sz)
+    if not compact
+        f_cell(tbl, 3, 0, "ATR", cMute, cHdr, sz)
+        f_cell(tbl, 4, 0, "Slope", cMute, cHdr, sz)
+
+    // Enabled MAs + price, sorted high → low
+    array<float> sv  = array.new<float>()
+    array<int>   sid = array.new<int>()
+    for i = 0 to 7
+        if aOn.get(i) and not na(aVal.get(i))
+            sv.push(aVal.get(i))
+            sid.push(i)
+    sv.push(close)
+    sid.push(-1)
+    array<int> ord = sv.sort_indices(order.descending)
+
+    int row   = 1
+    int above = 0
+    int total = 0
+    for k = 0 to ord.size() - 1
+        int   j    = ord.get(k)
+        int   slot = sid.get(j)
+        float v    = sv.get(j)
+        if slot == -1
+            f_cell(tbl, 0, row, "▶ PRICE", cPxTx, cPxBg, sz)
+            f_cell(tbl, 1, row, str.tostring(close, format.mintick), cPxTx, cPxBg, sz)
+            f_cell(tbl, 2, row, "", cPxTx, cPxBg, sz)
+            if not compact
+                f_cell(tbl, 3, row, "ATR " + str.tostring(atr14, format.mintick), cPxTx, cPxBg, sz)
+                f_cell(tbl, 4, row, "", cPxTx, cPxBg, sz)
+        else
+            total += 1
+            if close > v
+                above += 1
+            float  dPct = (close - v) / v * 100
+            bool   atMa = math.abs(dPct) <= atTol
+            color  tc   = atMa ? C_AT : dPct > 0 ? C_UP : C_DN
+            string dTx  = atMa ? "at MA" : f_signed(dPct, "0.00") + "%"
+            f_cell(tbl, 0, row, aNm.get(slot), tc, na, sz)
+            f_cell(tbl, 1, row, str.tostring(v, format.mintick), tc, na, sz)
+            f_cell(tbl, 2, row, dTx, tc, na, sz)
+            if not compact
+                float dAtr = atr14 > 0 ? (close - v) / atr14 : na
+                f_cell(tbl, 3, row, na(dAtr) ? "–" : f_signed(dAtr, "0.0") + " ATR", tc, na, sz)
+                float  pst = aPst.get(slot)
+                float  slp = na(pst) or pst == 0 ? na : (v - pst) / pst * 100
+                string arw = na(slp) ? "–" : slp > flatThr ? "▲" : slp < -flatThr ? "▼" : "►"
+                color  ac  = na(slp) ? cMute : slp > flatThr ? C_UP : slp < -flatThr ? C_DN : C_FLAT
+                table.cell(tbl, 4, row, arw, text_color = ac, text_size = sz, text_halign = text.align_center)
+        row += 1
+
+    // Summary row
+    color sc = stack == 1 ? C_UP : stack == -1 ? C_DN : C_FLAT
+    f_cell(tbl, 0, row, "Above " + str.tostring(above) + " / " + str.tostring(total) + " MAs", cTxt, cHdr, sz)
+    f_cell(tbl, 1, row, "", cTxt, cHdr, sz)
+    f_cell(tbl, 2, row, f_stackTxt(stack), sc, cHdr, sz)
+    table.merge_cells(tbl, 0, row, 1, row)
+    if not compact
+        f_cell(tbl, 3, row, "", sc, cHdr, sz)
+        f_cell(tbl, 4, row, "", sc, cHdr, sz)
+        table.merge_cells(tbl, 2, row, 4, row)
+
+    // Line-end labels
+    for l in lbls
+        label.delete(l)
+    lbls.clear()
+    if showLbl
+        for i = 0 to 7
+            float lv = aVal.get(i)
+            if aOn.get(i) and aPlt.get(i) and not na(lv)
+                lbls.push(label.new(bar_index + lblOff, lv, aNm.get(i), style = label.style_label_left, color = color.new(color.black, 100), textcolor = aCol.get(i), size = size.small))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════
+bool x1 = ta.cross(close, m1)
+bool x2 = ta.cross(close, m2)
+bool x3 = ta.cross(close, m3)
+bool x4 = ta.cross(close, m4)
+bool x5 = ta.cross(close, m5)
+bool x6 = ta.cross(close, m6)
+bool x7 = ta.cross(close, m7)
+bool x8 = ta.cross(close, m8)
+
+float gcF    = ta.ema(close, gcFast)
+float gcS    = ta.ema(close, gcSlow)
+bool  golden = ta.crossover(gcF, gcS)
+bool  death  = ta.crossunder(gcF, gcS)
+
+bool toBull  = stack == 1 and prevStack != 1
+bool toBear  = stack == -1 and prevStack != -1
+bool toMixed = stack == 0 and prevStack != 0
+
+alertcondition(s1On and x1, "Price × MA slot 1", "MA Map {{ticker}} {{interval}}: price crossed MA slot 1 at {{close}}")
+alertcondition(s2On and x2, "Price × MA slot 2", "MA Map {{ticker}} {{interval}}: price crossed MA slot 2 at {{close}}")
+alertcondition(s3On and x3, "Price × MA slot 3", "MA Map {{ticker}} {{interval}}: price crossed MA slot 3 at {{close}}")
+alertcondition(s4On and x4, "Price × MA slot 4", "MA Map {{ticker}} {{interval}}: price crossed MA slot 4 at {{close}}")
+alertcondition(s5On and x5, "Price × MA slot 5", "MA Map {{ticker}} {{interval}}: price crossed MA slot 5 at {{close}}")
+alertcondition(s6On and x6, "Price × MA slot 6", "MA Map {{ticker}} {{interval}}: price crossed MA slot 6 at {{close}}")
+alertcondition(s7On and x7, "Price × MA slot 7", "MA Map {{ticker}} {{interval}}: price crossed MA slot 7 at {{close}}")
+alertcondition(s8On and x8, "Price × MA slot 8", "MA Map {{ticker}} {{interval}}: price crossed MA slot 8 at {{close}}")
+alertcondition(golden, "Golden cross (fast/slow EMA)", "MA Map {{ticker}} {{interval}}: GOLDEN CROSS (fast EMA crossed above slow EMA) at {{close}}")
+alertcondition(death, "Death cross (fast/slow EMA)", "MA Map {{ticker}} {{interval}}: DEATH CROSS (fast EMA crossed below slow EMA) at {{close}}")
+alertcondition(toBull, "Stack → Bullish", "MA Map {{ticker}} {{interval}}: trend stack turned BULLISH")
+alertcondition(toBear, "Stack → Bearish", "MA Map {{ticker}} {{interval}}: trend stack turned BEARISH")
+alertcondition(toMixed, "Stack → Mixed", "MA Map {{ticker}} {{interval}}: trend stack back to MIXED")
+alertcondition(stack != prevStack, "Stack changed (any)", "MA Map {{ticker}} {{interval}}: trend stack changed")
+
+if dynAlerts and barstate.isconfirmed
+    array<bool> aX = array.from(x1, x2, x3, x4, x5, x6, x7, x8)
+    for i = 0 to 7
+        if aOn.get(i) and aX.get(i)
+            float mv = aVal.get(i)
+            alert(syminfo.ticker + " " + timeframe.period + ": price crossed " + (close > mv ? "ABOVE " : "BELOW ") + aNm.get(i) + " (" + str.tostring(mv, format.mintick) + ")", alert.freq_once_per_bar_close)
+    if golden
+        alert(syminfo.ticker + " " + timeframe.period + ": GOLDEN CROSS — EMA " + str.tostring(gcFast) + " crossed above EMA " + str.tostring(gcSlow), alert.freq_once_per_bar_close)
+    if death
+        alert(syminfo.ticker + " " + timeframe.period + ": DEATH CROSS — EMA " + str.tostring(gcFast) + " crossed below EMA " + str.tostring(gcSlow), alert.freq_once_per_bar_close)
+    if stack != prevStack
+        alert(syminfo.ticker + " " + timeframe.period + ": trend stack " + f_stackTxt(prevStack) + " → " + f_stackTxt(stack), alert.freq_once_per_bar_close)
