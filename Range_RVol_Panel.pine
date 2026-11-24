@@ -1,0 +1,397 @@
+//@version=6
+// ============================================================================
+//  Range & RVol Panel  (universal: futures, NSE/BSE, MCX, forex, crypto)
+//
+//  Compact overlay table: today's range vs daily ATR, range left, chart ATR,
+//  time-of-day relative volume, and a volatility-regime label.
+//
+//  DTR and daily ATR are pulled from the DAILY timeframe via request.security,
+//  so they are IDENTICAL on every chart timeframe and never accumulate across
+//  days (this fixes both the "values change with timeframe" problem and the
+//  "24h symbols show a giant range" bug). Crypto / Custom modes track intrabar.
+//
+//  No price plots except optional ATR projection lines. Panel size is set with
+//  the width / height / font inputs (TradingView cannot make a script-drawn
+//  table mouse-draggable; only hand-placed drawings can be dragged).
+// ============================================================================
+indicator("Range & RVol Panel", overlay = true, max_lines_count = 20)
+
+type SessVol
+    array<float> cum                       // cumulative session volume by bar-of-session
+
+// ============================================================================
+//  INPUTS
+// ============================================================================
+var string G_SESS = "Session"
+var string G_AR   = "ATR & RVol"
+var string G_REG  = "Regime"
+var string G_DISP = "Display"
+
+string MODE_AUTO = "Auto"
+string MODE_EXCH = "Exchange / cash session"
+string MODE_MAIN = "Main session (RTH)"
+string MODE_FULL = "Full 24h (ETH)"
+string MODE_CUST = "Custom"
+sessMode  = input.string(MODE_AUTO, "Session mode", options = [MODE_AUTO, MODE_EXCH, MODE_MAIN, MODE_FULL, MODE_CUST], group = G_SESS, tooltip = "Auto/Exchange/Main use the symbol's regular (cash/RTH) daily bar. Full 24h uses the extended (overnight) daily bar. Custom tracks your own window intrabar. Crypto uses an anchored 24/7 day.")
+custSess  = input.session("0930-1600", "Custom session",   group = G_SESS)
+custTz    = input.string("America/New_York", "Custom timezone", group = G_SESS)
+anchorMode = input.string("UTC 00:00", "Crypto day anchor", options = ["UTC 00:00", "US open 09:30 NY", "Custom"], group = G_SESS)
+custAncH  = input.int(0, "Custom anchor hour",   minval = 0, maxval = 23, group = G_SESS)
+custAncM  = input.int(0, "Custom anchor minute", minval = 0, maxval = 59, group = G_SESS)
+custAncTz = input.string("UTC", "Custom anchor timezone", group = G_SESS)
+
+atrLen   = input.int(14, "ATR length (days)", minval = 1, group = G_AR)
+rvolLB   = input.int(10, "RVol lookback (sessions)", minval = 1, maxval = 90, group = G_AR)
+barRvLen = input.int(20, "Bar RVol SMA length", minval = 1, group = G_AR)
+
+quietTh  = input.float(50.0,  "Quiet < (% of ATR)",    group = G_REG)
+extTh    = input.float(100.0, "Extended > (% of ATR)", group = G_REG)
+
+tablePos = input.string("Top-right", "Table position", options = ["Top-right", "Top-left", "Bottom-right", "Bottom-left"], group = G_DISP)
+compact  = input.bool(false, "Compact mode (2 cols)", group = G_DISP)
+fsizeIn  = input.string("Normal", "Font size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = G_DISP)
+wLabel   = input.int(0, "Label column width %  (0 = auto)", minval = 0, maxval = 50, group = G_DISP)
+wValue   = input.int(0, "Value column width %  (0 = auto)", minval = 0, maxval = 50, group = G_DISP)
+rowH     = input.int(0, "Row height %  (0 = auto)",         minval = 0, maxval = 20, group = G_DISP)
+showHdr  = input.bool(true,  "Show header row", group = G_DISP)
+showDTR  = input.bool(true,  "Row: DTR",        group = G_DISP)
+showATR  = input.bool(true,  "Row: Daily ATR",  group = G_DISP)
+showPct  = input.bool(true,  "Row: DTR % ATR",  group = G_DISP)
+showLeft = input.bool(true,  "Row: Range left", group = G_DISP)
+showCATR = input.bool(true,  "Row: Chart ATR",  group = G_DISP)
+showRVol = input.bool(true,  "Row: RVol",       group = G_DISP)
+showReg  = input.bool(true,  "Row: Regime",     group = G_DISP)
+bgCol    = input.color(color.new(#0b0e11, 8),  "Background", group = G_DISP)
+hdrBg    = input.color(color.new(#1c2733, 0),  "Header background", group = G_DISP)
+labelCol = input.color(color.new(#b2b5be, 0),  "Label text",  group = G_DISP)
+valCol   = input.color(color.new(#ffffff, 0),  "Value text",  group = G_DISP)
+goodCol  = input.color(color.new(#26a69a, 0),  "Good / high", group = G_DISP)
+warnCol  = input.color(color.new(#ff9800, 0),  "Warn",        group = G_DISP)
+badCol   = input.color(color.new(#ef5350, 0),  "Bad / low",   group = G_DISP)
+quietCol = input.color(color.new(#787b86, 0),  "Regime: Quiet",    group = G_DISP)
+normCol  = input.color(color.new(#2962ff, 0),  "Regime: Normal",   group = G_DISP)
+extCol   = input.color(color.new(#ff9800, 0),  "Regime: Extended", group = G_DISP)
+showProj = input.bool(false, "Draw ATR projection lines", group = G_DISP)
+projCol  = input.color(color.new(color.gray, 0), "Projection line color", group = G_DISP)
+
+// ============================================================================
+//  HELPERS
+// ============================================================================
+// DST-safe anchored-day id: local wall-clock components -> UTC -> shift by anchor
+f_dayBucket(string tz, int aMin) =>
+    int localWall = timestamp("GMT", year(time, tz), month(time, tz), dayofmonth(time, tz), hour(time, tz), minute(time, tz), 0)
+    int(math.floor((localWall - aMin * 60000) / 86400000))
+
+f_hhmm(string x) => str.length(x) >= 4 ? str.substring(x, 0, 2) + ":" + str.substring(x, 2, 4) : x
+
+// Turn a session string ("0915-1530", "0930-1600:23456", "0000-0000") into "09:15–15:30"
+f_sessTime(string s) =>
+    string core = array.get(str.split(s, ":"), 0)
+    int dpos = str.pos(core, "-")
+    string res = core
+    if not na(dpos)
+        string st = str.substring(core, 0, dpos)
+        string en = str.substring(core, dpos + 1)
+        if str.contains(core, ",")
+            array<string> parts = str.split(core, ",")
+            string first = array.get(parts, 0)
+            string last  = array.get(parts, array.size(parts) - 1)
+            st := str.substring(first, 0, str.pos(first, "-"))
+            en := str.substring(last, str.pos(last, "-") + 1)
+        res := st == en ? "24h" : f_hhmm(st) + "–" + f_hhmm(en)
+    res
+
+f_tzAbbr(string z) =>
+    switch z
+        "Asia/Kolkata"     => "IST"
+        "America/New_York" => "ET"
+        "America/Chicago"  => "CT"
+        "UTC"              => "UTC"
+        "Etc/UTC"          => "UTC"
+        "Europe/London"    => "UK"
+        "Asia/Tokyo"       => "JST"
+        "Australia/Sydney" => "AEST"
+        => z
+
+f_pos(string s) =>
+    switch s
+        "Top-left"     => position.top_left
+        "Bottom-right" => position.bottom_right
+        "Bottom-left"  => position.bottom_left
+        => position.top_right
+f_size(string s) =>
+    switch s
+        "Tiny"  => size.tiny
+        "Small" => size.small
+        "Large" => size.large
+        "Huge"  => size.huge
+        => size.normal
+
+f_pts(float x)   => na(x) ? "n/a" : str.tostring(x, format.mintick)
+f_ticks(float x) => na(x) ? "n/a" : str.tostring(math.round(x / syminfo.mintick)) + "t"
+f_pct(float x)   => na(x) ? "n/a" : str.tostring(x, "#") + "%"
+f_x(float x)     => na(x) ? "n/a" : str.tostring(x, "#.00") + "x"
+
+// ============================================================================
+//  RESOLVE BASIS
+//   DAILY  -> DTR & ATR from daily request.security (timeframe-independent)  [default]
+//   CRYPTO -> in-script anchored 24/7 day
+//   CUSTOM -> in-script tracking of a user window
+// ============================================================================
+int BASIS_DAILY  = 0
+int BASIS_CRYPTO = 1
+int BASIS_CUSTOM = 2
+
+string px = syminfo.prefix
+bool isCrypto  = syminfo.type == "crypto"
+bool custIs24h = str.contains(custSess, "0000-0000")
+
+int basis = isCrypto ? BASIS_CRYPTO : (sessMode == MODE_CUST and not custIs24h) ? BASIS_CUSTOM : BASIS_DAILY
+
+// Regular (cash / RTH) vs extended (overnight) daily bar
+bool useRegular = not (sessMode == MODE_FULL or (sessMode == MODE_CUST and custIs24h))
+
+// Crypto anchor
+int    anchorMin = 0
+string anchorTz  = "UTC"
+string anchorLabel = "UTC day"
+if anchorMode == "US open 09:30 NY"
+    anchorMin := 570, anchorTz := "America/New_York", anchorLabel := "NY 09:30"
+else if anchorMode == "Custom"
+    anchorMin := custAncH * 60 + custAncM
+    anchorTz  := custAncTz
+    anchorLabel := "anc " + f_hhmm(str.format("{0,number,00}{1,number,00}", custAncH, custAncM))
+
+// Source tag for the header
+string srcTag = "Exch"
+if isCrypto
+    srcTag := "Crypto"
+else if str.contains(px, "NSE")
+    srcTag := "NSE"
+else if str.contains(px, "BSE")
+    srcTag := "BSE"
+else if str.contains(px, "MCX")
+    srcTag := "MCX"
+else if syminfo.type == "futures"
+    srcTag := "Fut"
+else if syminfo.type == "forex" or syminfo.type == "cfd"
+    srcTag := "FX"
+else
+    srcTag := str.upper(syminfo.type)
+if sessMode == MODE_CUST
+    srcTag := "Custom"
+
+// ============================================================================
+//  DAILY DATA via request.security  (identical on every chart timeframe)
+// ============================================================================
+simple string dTkr = ticker.new(syminfo.prefix, syminfo.ticker, useRegular ? session.regular : session.extended)
+[dHigh, dLow] = request.security(dTkr, "1D", [high, low])                                           // today's range so far
+float dAtr    = request.security(dTkr, "1D", ta.atr(atrLen)[1], lookahead = barmerge.lookahead_on)  // completed days, no repaint
+
+// ============================================================================
+//  BOUNDARY DETECTION (crypto / custom DTR + RVol volume reset)
+// ============================================================================
+int  cryptoBucket = f_dayBucket(anchorTz, anchorMin)
+bool inSessRaw    = basis == BASIS_CUSTOM ? not na(time(timeframe.period, custSess, custTz)) : true
+
+bool resetBoundary = basis == BASIS_CRYPTO ? (bar_index == 0 or cryptoBucket != cryptoBucket[1]) : basis == BASIS_CUSTOM ? (inSessRaw and (bar_index == 0 or not inSessRaw[1])) : (bar_index == 0 or timeframe.change("1D"))
+bool accumActive   = basis == BASIS_CUSTOM ? inSessRaw : true
+
+// ============================================================================
+//  PER-BAR STATE  (in-script range for crypto/custom + RVol profile for all)
+// ============================================================================
+var float sessHigh = na
+var float sessLow  = na
+var array<float>   dtrArr     = array.new<float>()
+var array<float>   curSessCum = array.new<float>()
+var array<SessVol> hist       = array.new<SessVol>()
+var float cumVol = 0.0
+var int   boS    = 0
+
+if resetBoundary
+    if (basis == BASIS_CRYPTO or basis == BASIS_CUSTOM) and not na(sessHigh) and not na(sessLow)
+        array.push(dtrArr, sessHigh - sessLow)
+        if array.size(dtrArr) > atrLen
+            array.shift(dtrArr)
+    if array.size(curSessCum) > 0
+        array.push(hist, SessVol.new(array.copy(curSessCum)))
+        if array.size(hist) > rvolLB
+            array.shift(hist)
+    sessHigh := high
+    sessLow  := low
+    array.clear(curSessCum)
+    cumVol := nz(volume)
+    boS    := 0
+    array.push(curSessCum, cumVol)
+else if accumActive
+    sessHigh := na(sessHigh) ? high : math.max(sessHigh, high)
+    sessLow  := na(sessLow)  ? low  : math.min(sessLow,  low)
+    cumVol   := cumVol + nz(volume)
+    boS      := boS + 1
+    array.push(curSessCum, cumVol)
+
+// ============================================================================
+//  DTR & ATR  (daily for the common case; in-script for crypto / custom)
+// ============================================================================
+float chartAtr = ta.atr(atrLen)
+float barRvSma = ta.sma(volume, barRvLen)
+float vol20    = math.sum(nz(volume), 20)
+
+float dtr      = basis == BASIS_DAILY ? (not na(dHigh) and not na(dLow) ? dHigh - dLow : na) : (not na(sessHigh) and not na(sessLow) ? sessHigh - sessLow : na)
+float atrValue = basis == BASIS_DAILY ? dAtr : (array.size(dtrArr) > 0 ? array.avg(dtrArr) : na)
+
+// ============================================================================
+//  VOLUME CLASSIFICATION
+// ============================================================================
+bool   noVol   = na(volume) or vol20 == 0
+string rvTag   = isCrypto ? syminfo.prefix : (syminfo.type == "forex" or syminfo.type == "cfd" ? "tick" : "")
+string volHint = (str.contains(px, "NSE") or str.contains(px, "BSE")) ? "↳ use " + syminfo.ticker + "1! for RVol" : "↳ use futures for RVol"
+
+// ============================================================================
+//  DERIVED METRICS
+// ============================================================================
+float dtrPct    = (not na(dtr) and not na(atrValue) and atrValue > 0) ? dtr / atrValue * 100.0 : na
+float rangeLeft = (not na(dtr) and not na(atrValue)) ? atrValue - dtr : na
+float barRvol   = (not noVol and not na(barRvSma) and barRvSma > 0) ? volume / barRvSma : na
+
+float rvolTod = na
+if not noVol and barstate.islast and array.size(hist) > 0
+    float s = 0.0
+    int   c = 0
+    for i = 0 to array.size(hist) - 1
+        SessVol sv = array.get(hist, i)
+        if array.size(sv.cum) > boS
+            s += array.get(sv.cum, boS)
+            c += 1
+    float avgCum = c > 0 ? s / c : na
+    rvolTod := (not na(avgCum) and avgCum > 0) ? cumVol / avgCum : na
+
+// Colours
+f_regCol(float pct) => na(pct) ? labelCol : pct < quietTh ? quietCol : pct <= extTh ? normCol : extCol
+f_rvCol(float v)    => na(v)   ? labelCol : v >= 1.3 ? goodCol : v <= 0.7 ? badCol : valCol
+color leftCol = na(rangeLeft) ? labelCol : rangeLeft <= 0 ? badCol : (not na(atrValue) and rangeLeft > atrValue * 0.33 ? goodCol : warnCol)
+
+string regTxt = "n/a"
+color  regCol = quietCol
+if not na(dtrPct)
+    if dtrPct < quietTh
+        regTxt := "Quiet",    regCol := quietCol
+    else if dtrPct <= extTh
+        regTxt := "Normal",   regCol := normCol
+    else
+        regTxt := "Extended", regCol := extCol
+
+string prevTag  = (basis == BASIS_CUSTOM and not inSessRaw) ? " (prev)" : ""
+string sessDisp = basis == BASIS_CRYPTO ? anchorLabel : basis == BASIS_CUSTOM ? f_sessTime(custSess) + " " + f_tzAbbr(custTz) : (useRegular ? f_sessTime(session.regular) + " " + f_tzAbbr(syminfo.timezone) : "24h ETH")
+
+// ============================================================================
+//  OPTIONAL ATR PROJECTION LINES
+// ============================================================================
+float projBaseLo = basis == BASIS_DAILY ? dLow  : sessLow
+float projBaseHi = basis == BASIS_DAILY ? dHigh : sessHigh
+var line projUp = na
+var line projDn = na
+if showProj and barstate.islast and not na(atrValue) and not na(projBaseLo) and not na(projBaseHi)
+    float up = projBaseLo + atrValue
+    float dn = projBaseHi - atrValue
+    if na(projUp)
+        projUp := line.new(bar_index - 1, up, bar_index, up, extend = extend.right, color = projCol, style = line.style_dashed)
+        projDn := line.new(bar_index - 1, dn, bar_index, dn, extend = extend.right, color = projCol, style = line.style_dashed)
+    else
+        line.set_xy1(projUp, bar_index - 1, up), line.set_xy2(projUp, bar_index, up)
+        line.set_xy1(projDn, bar_index - 1, dn), line.set_xy2(projDn, bar_index, dn)
+
+// ============================================================================
+//  TABLE
+// ============================================================================
+var table t = na
+
+// one helper so every cell honours the width / height inputs
+f_cell(int col, int row, string txt, color tcol, string halign, string fs, color bg) =>
+    table.cell(t, col, row, txt, text_color = tcol, text_halign = halign, text_size = fs, bgcolor = bg, width = col == 0 ? wLabel : wValue, height = rowH)
+
+bool hintRow = showRVol and noVol
+int nRows = (showHdr ? 1 : 0) + (showDTR ? 1 : 0) + (showATR ? 1 : 0) + (showPct ? 1 : 0) + (showLeft ? 1 : 0) + (showCATR ? 1 : 0) + (showRVol ? 1 : 0) + (hintRow ? 1 : 0) + (showReg ? 1 : 0)
+int nCols = compact ? 2 : 3
+
+f_L(string s) => "  " + s + "   "
+f_R(string s) => s + "  "
+
+if barstate.islast
+    int rows = math.max(nRows, 1)
+    if na(t)
+        t := table.new(f_pos(tablePos), nCols, rows, bgcolor = bgCol, frame_color = hdrBg, frame_width = 1, border_color = color.new(labelCol, 75), border_width = 1)
+    else
+        table.clear(t, 0, 0, nCols - 1, rows - 1)
+
+    string fs = f_size(fsizeIn)
+    int r = 0
+
+    if showHdr
+        f_cell(0, r, f_L(srcTag),   color.new(#4ea1ff, 0), text.align_left,  fs, hdrBg)
+        f_cell(1, r, f_R(sessDisp), valCol,                text.align_right, fs, hdrBg)
+        if not compact
+            f_cell(2, r, "", labelCol, text.align_right, fs, hdrBg)
+        r += 1
+
+    if showDTR
+        f_cell(0, r, f_L(compact ? "DTR" : "DTR (range)"), labelCol, text.align_left,  fs, bgCol)
+        f_cell(1, r, f_R(f_pts(dtr) + prevTag),            valCol,   text.align_right, fs, bgCol)
+        if not compact
+            f_cell(2, r, "", labelCol, text.align_right, fs, bgCol)
+        r += 1
+
+    if showATR
+        f_cell(0, r, f_L(compact ? "ATR" : "Daily ATR(" + str.tostring(atrLen) + ")"), labelCol, text.align_left,  fs, bgCol)
+        f_cell(1, r, f_R(f_pts(atrValue)),                                             valCol,   text.align_right, fs, bgCol)
+        if not compact
+            f_cell(2, r, f_R(f_ticks(atrValue)), labelCol, text.align_right, fs, bgCol)
+        r += 1
+
+    if showPct
+        f_cell(0, r, f_L(compact ? "%" : "DTR % ATR"),   labelCol,         text.align_left,  fs, bgCol)
+        f_cell(1, r, f_R(f_pct(dtrPct) + prevTag),       f_regCol(dtrPct), text.align_right, fs, bgCol)
+        if not compact
+            f_cell(2, r, "", labelCol, text.align_right, fs, bgCol)
+        r += 1
+
+    if showLeft
+        string lPts = na(rangeLeft) ? "n/a" : (rangeLeft <= 0 ? "Extended" : f_pts(rangeLeft))
+        string lTk  = na(rangeLeft) ? "n/a" : (rangeLeft <= 0 ? "0t" : f_ticks(rangeLeft))
+        string lCmp = na(rangeLeft) ? "n/a" : (rangeLeft <= 0 ? "Extended" : f_pts(rangeLeft) + " (" + f_ticks(rangeLeft) + ")")
+        f_cell(0, r, f_L(compact ? "Left" : "Range left"),   labelCol, text.align_left,  fs, bgCol)
+        f_cell(1, r, f_R((compact ? lCmp : lPts) + prevTag), leftCol,  text.align_right, fs, bgCol)
+        if not compact
+            f_cell(2, r, f_R(lTk), leftCol, text.align_right, fs, bgCol)
+        r += 1
+
+    if showCATR
+        f_cell(0, r, f_L(compact ? "cATR" : "Chart ATR(" + str.tostring(atrLen) + ")"), labelCol, text.align_left,  fs, bgCol)
+        f_cell(1, r, f_R(compact ? f_pts(chartAtr) + " (" + f_ticks(chartAtr) + ")" : f_pts(chartAtr)), valCol, text.align_right, fs, bgCol)
+        if not compact
+            f_cell(2, r, f_R(f_ticks(chartAtr)), labelCol, text.align_right, fs, bgCol)
+        r += 1
+
+    if showRVol
+        string rvFull = noVol ? "RVol" : (rvTag != "" ? "RVol (" + rvTag + ")" : "RVol (ToD)")
+        string todStr = noVol ? "n/a" : f_x(rvolTod)
+        string barStr = noVol ? "n/a" : f_x(barRvol)
+        f_cell(0, r, f_L(compact ? "RVol" : rvFull), labelCol, text.align_left, fs, bgCol)
+        f_cell(1, r, f_R(compact ? (noVol ? "n/a" : todStr + " (" + barStr + ")") : todStr), f_rvCol(rvolTod), text.align_right, fs, bgCol)
+        if not compact
+            f_cell(2, r, f_R(noVol ? "" : "bar " + barStr), f_rvCol(barRvol), text.align_right, fs, bgCol)
+        r += 1
+
+    if hintRow
+        f_cell(0, r, f_L(volHint), warnCol, text.align_left, f_size(fsizeIn == "Huge" ? "Normal" : "Small"), bgCol)
+        f_cell(1, r, "", labelCol, text.align_right, fs, bgCol)
+        if not compact
+            f_cell(2, r, "", labelCol, text.align_right, fs, bgCol)
+        r += 1
+
+    if showReg
+        f_cell(0, r, f_L("Regime"), labelCol,    text.align_left,   fs, bgCol)
+        f_cell(1, r, f_R(regTxt),   color.white, text.align_center, fs, regCol)
+        if not compact
+            f_cell(2, r, f_R(f_pct(dtrPct)), color.white, text.align_right, fs, regCol)
+        r += 1
